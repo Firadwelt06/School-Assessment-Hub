@@ -1,21 +1,44 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="topbar"><div><div class="eyebrow">CONTENT STUDIO</div><h1>Add question manually</h1><p class="muted">Formula support: enter LaTeX between <code>\(...\)</code> for inline formulas or <code>\[...\]</code> for display formulas.</p></div></div>
-<form method="post" class="panel">
+<div class="topbar"><div><div class="eyebrow">CONTENT STUDIO</div><h1>Add questions manually</h1><p class="muted">Add one question or use “Add another question” to create several questions in one submission. Formula support uses <code>\(...\)</code> or <code>\[...\]</code>.</p></div></div>
+<form method="post" enctype="multipart/form-data" class="panel">
   <div class="form-grid">
     <label>Subject<input name="subject" required placeholder="Mathematics"></label>
     <label>Topic<input name="topic" required placeholder="Quadratic equations"></label>
     <label>Class<input name="class_name" placeholder="SS2 A" required></label>
     <label>Difficulty<select name="difficulty"><option value="easy">Easy</option><option value="medium" selected>Medium</option><option value="hard">Hard</option></select></label>
-    <label class="full">Question stem<textarea name="stem" rows="4" required placeholder="Solve \(x^2 - 5x + 6 = 0\)."></textarea></label>
-    <label>Option A<textarea name="option_a" rows="3" required></textarea></label>
-    <label>Option B<textarea name="option_b" rows="3" required></textarea></label>
-    <label>Option C<textarea name="option_c" rows="3" required></textarea></label>
-    <label>Option D<textarea name="option_d" rows="3" required></textarea></label>
-    <label>Correct option<select name="correct_option"><option>A</option><option>B</option><option>C</option><option>D</option></select></label>
     <label>Curriculum standard<input name="standard"></label>
-    <label class="full">Marking explanation<textarea name="explanation" rows="3"></textarea></label>
+    <label>Shared explanation (optional)<textarea name="explanation" rows="2"></textarea></label>
   </div>
-  <button class="button primary">Save manual question</button>
+  <div id="manual-questions">
+    <fieldset class="manual-question">
+      <legend>Question 1</legend>
+      <label class="full">Question stem<textarea name="stem[]" rows="4" required placeholder="Solve \(x^2 - 5x + 6 = 0\)."></textarea></label>
+      <div class="form-grid">
+        <label>Option A<textarea name="option_a[]" rows="3" required></textarea></label>
+        <label>Option B<textarea name="option_b[]" rows="3" required></textarea></label>
+        <label>Option C<textarea name="option_c[]" rows="3" required></textarea></label>
+        <label>Option D<textarea name="option_d[]" rows="3" required></textarea></label>
+        <label>Correct option<select name="correct_option[]"><option>A</option><option>B</option><option>C</option><option>D</option></select></label>
+        <label>Question image (optional)<input name="question_image[]" type="file" accept=".png,.jpg,.jpeg,.webp,.gif"></label>
+      </div>
+    </fieldset>
+  </div>
+  <div class="question-actions"><button type="button" class="button secondary" id="add-question">Add another question</button><button class="button primary">Save all questions</button></div>
 </form>
+<script>
+(() => {
+  const container = document.getElementById("manual-questions");
+  const addButton = document.getElementById("add-question");
+  addButton.addEventListener("click", () => {
+    const number = container.querySelectorAll(".manual-question").length + 1;
+    const item = container.querySelector(".manual-question").cloneNode(true);
+    item.querySelector("legend").textContent = `Question ${number}`;
+    item.querySelectorAll("textarea").forEach((field) => { field.value = ""; });
+    item.querySelectorAll("select").forEach((field) => { field.value = "A"; });
+    item.querySelectorAll("input[type=file]").forEach((field) => { field.value = ""; });
+    container.appendChild(item);
+  });
+})();
+</script>
 {% endblock %}

@@ -65,7 +65,7 @@ bolu, Bolu Yusuf,StudentPass2,SS2 A
 
 ## Student rankings and exam timer
 
-Teachers and administrators can open **Student Rankings** to see subject rankings within each class and overall rankings within each class. Students see a countdown timer during every CBT exam. At five minutes and one minute remaining, the timer changes color and displays a warning. When it reaches zero, the exam is submitted automatically.
+Teachers and administrators can open **Student Rankings** to see subject rankings within each class and overall rankings within each class. The class filter also offers combined cohorts such as `SS1`, which combines `SS1 A`, `SS1 B`, and similar sections. Rankings can be narrowed by subject, exam type, and subject/overall view. Students see a countdown timer during every CBT exam. At five minutes and one minute remaining, the timer changes color and displays a warning. When it reaches zero, the exam is submitted automatically.
 The server also records the start time and rejects submissions after the configured duration. Refreshing the page does not reset the timer.
 
 Administrators can delete teacher and student access from **Administration**. The account is disabled rather than physically removed so historical scores and rankings remain intact.
@@ -73,6 +73,10 @@ Administrators can delete teacher and student access from **Administration**. Th
 ## Themes, formulas, and manual questions
 
 Administrators can choose Ocean, Forest, Royal, Sunset, or Slate from **Administration**. They can also upload a PNG/JPG/WEBP image to use as the application background. The school logo is shown at a larger size in the navigation and examination header.
+
+Administrators can publish or unpublish exams and change each exam's type and duration from the administration page. Teachers and administrators can select multiple question-bank items when creating an exam, filter the bank by subject or class, and add illustrations to manually created or edited questions. Supported question images are PNG, JPG/JPEG, WEBP, and GIF.
+
+The manual question editor also supports bulk entry: click **Add another question**, complete each question card, then click **Save all questions** to add them together.
 
 Teachers and administrators can use **Add question manually**. Enter formulas in LaTeX:
 
