@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="topbar"><div><div class="eyebrow">CONTENT STUDIO</div><h1>Edit question</h1><p class="muted">Review and manually correct the generated question before using it in an examination.</p></div></div>
+<form method="post" class="panel">
+  <div class="form-grid">
+    <label>Subject<input name="subject" value="{{ question.subject }}" required></label>
+    <label>Topic<input name="topic" value="{{ question.topic }}" required></label>
+    <label>Class<input name="class_name" value="{{ question.class_name or '' }}"></label>
+    <label class="full">Question stem<textarea name="stem" rows="3" required>{{ question.stem }}</textarea></label>
+    <label>Option A<textarea name="option_a" rows="4" required>{{ question.option_a }}</textarea></label>
+    <label>Option B<textarea name="option_b" rows="4" required>{{ question.option_b }}</textarea></label>
+    <label>Option C<textarea name="option_c" rows="4" required>{{ question.option_c }}</textarea></label>
+    <label>Option D<textarea name="option_d" rows="4" required>{{ question.option_d }}</textarea></label>
+    <label>Correct option<select name="correct_option">{% for option in ['A','B','C','D'] %}<option value="{{ option }}" {% if question.correct_option == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></label>
+    <label>Difficulty<select name="difficulty">{% for level in ['easy','medium','hard'] %}<option value="{{ level }}" {% if question.difficulty == level %}selected{% endif %}>{{ level|capitalize }}</option>{% endfor %}</select></label>
+    <label>Curriculum standard<input name="standard" value="{{ question.standard or '' }}"></label>
+    <label class="full">Marking explanation<textarea name="explanation" rows="3">{{ question.explanation or '' }}</textarea></label>
+  </div>
+  <div class="question-actions"><button class="button primary">Save changes</button><a class="button secondary" href="{{ url_for('questions') }}">Cancel</a></div>
+</form>
+{% endblock %}

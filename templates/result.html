@@ -1,0 +1,2 @@
+{% extends "base.html" %}
+{% block content %}<section class="result-card"><div class="eyebrow">SUBMISSION COMPLETE</div><h1>{{ exam.title }}</h1><div class="score">{{ score }}<small>/ {{ total }}</small></div><p>Your responses have been recorded securely.</p><a class="button primary" href="{{ url_for('dashboard') }}">Return to dashboard</a></section>{% endblock %}

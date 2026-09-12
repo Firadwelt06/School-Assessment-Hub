@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ school.school_name }} · Assessment Hub</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script>
+    window.MathJax = {tex: {inlineMath: [['\\(', '\\)']], displayMath: [['\\[', '\\]']]}};
+  </script>
+  <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+  <style>
+    .secondary{background:#eaf1f7;color:#102a43}.secondary:hover{background:#d9e5ef}
+    .question-actions{display:flex;align-items:center;gap:12px;margin-top:15px}
+  </style>
+</head>
+<body class="theme-{{ school.theme }}" {% if school.theme == 'image' and school.theme_image %}style="--theme-image: url('{{ url_for('uploads', filename=school.theme_image) }}')"{% endif %}>
+{% if user %}
+<aside class="sidebar">
+  <a class="brand" href="{{ url_for('dashboard') }}">
+    {% if school.school_logo %}<img src="{{ url_for('uploads', filename=school.school_logo) }}" alt="School logo">{% else %}<span class="brand-mark">SA</span>{% endif %}
+    <span>{{ school.school_name }}</span>
+  </a>
+  <nav>
+    <a href="{{ url_for('dashboard') }}">Dashboard</a>
+    {% if user.role in ['admin', 'teacher'] %}
+    <a href="{{ url_for('questions') }}">Question Bank</a>
+    <a href="{{ url_for('new_exam') }}">Create Exam</a>
+    <a href="{{ url_for('rankings') }}">Student Rankings</a>
+    {% endif %}
+    {% if user.role == 'admin' %}<a href="{{ url_for('admin') }}">Administration</a>{% endif %}
+  </nav>
+  <div class="sidebar-footer"><small>{{ user.full_name }}</small><a href="{{ url_for('logout') }}">Sign out</a></div>
+</aside>
+{% endif %}
+<main class="{{ 'with-sidebar' if user else '' }}">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}<div class="flash {{ category }}">{{ message }}</div>{% endfor %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</main>
+<script>window.addEventListener("load", () => window.MathJax && window.MathJax.typesetPromise && window.MathJax.typesetPromise());</script>
+</body>
+</html>

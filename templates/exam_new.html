@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="topbar"><div><div class="eyebrow">EXAM BUILDER</div><h1>Create examination</h1><p class="muted">Select questions and publish a polished CBT paper.</p></div></div>
+<form method="post" class="panel">
+  <div class="form-grid"><label>Exam title<input name="title" placeholder="Mid-term Biology Assessment" required></label><label>Subject<input name="subject" required></label><label>Duration (minutes)<input name="duration_minutes" type="number" min="5" value="60" required></label><label class="full">Instructions<textarea name="instructions" rows="3">Choose the best answer for each question.</textarea></label></div>
+  <div class="section-title"><h2>Select questions</h2><span class="muted">{{ questions|length }} available</span></div>
+  <div class="question-picker">{% for q in questions %}<label class="pick"><input type="checkbox" name="question_ids" value="{{ q.id }}"><span><b>{{ q.subject }} · {{ q.topic }}{% if q.class_name %} · {{ q.class_name }}{% endif %}</b>{{ q.stem }}</span></label>{% else %}<p class="empty">Generate questions first.</p>{% endfor %}</div>
+  <label class="check"><input type="checkbox" name="published"> Publish immediately to students</label>
+  <button class="button primary">Create examination</button>
+</form>
+{% endblock %}

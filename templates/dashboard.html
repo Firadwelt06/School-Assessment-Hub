@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="topbar"><div><div class="eyebrow">OVERVIEW</div><h1>Good day, {{ user.full_name.split(' ')[0] }}</h1><p class="muted">Manage assessments and monitor learning progress.</p></div><span class="role-pill">{{ user.role|upper }}</span></div>
+<div class="stats"><div class="stat"><span>Question bank</span><strong>{{ stats.questions }}</strong></div><div class="stat"><span>Exams</span><strong>{{ stats.exams }}</strong></div><div class="stat"><span>Submissions</span><strong>{{ stats.attempts }}</strong></div></div>
+{% if user.role == 'student' %}
+<section class="panel"><div class="section-title"><h2>Available examinations</h2><span class="muted">Select an exam to begin</span></div>
+{% for exam in exams if exam.published %}
+<div class="exam-row"><div><strong>{{ exam.title }}</strong><span>{{ exam.subject }} · {{ exam.question_count }} questions · {{ exam.duration_minutes }} minutes</span></div><a class="button primary" href="{{ url_for('take_exam', exam_id=exam.id) }}">Start exam</a></div>
+{% else %}<p class="empty">No published examinations are available.</p>{% endfor %}</section>
+{% else %}
+<form class="filter-bar inline-filters"><label>Subject<select name="subject" onchange="this.form.submit()"><option value="">All subjects</option>{% for subject in subjects %}<option value="{{ subject }}" {% if subject_filter == subject %}selected{% endif %}>{{ subject }}</option>{% endfor %}</select></label><label>Status<select name="status" onchange="this.form.submit()"><option value="">All statuses</option><option value="published" {% if status_filter == 'published' %}selected{% endif %}>Published</option><option value="draft" {% if status_filter == 'draft' %}selected{% endif %}>Draft</option></select></label></form>
+<section class="panel"><div class="section-title"><h2>Recent examinations</h2><a class="button primary" href="{{ url_for('new_exam') }}">Create exam</a></div>
+{% for exam in exams %}<div class="exam-row"><div><strong>{{ exam.title }}</strong><span>{{ exam.subject }} · {{ exam.question_count }} questions</span></div><span class="status {{ 'published' if exam.published else 'draft' }}">{{ 'Published' if exam.published else 'Draft' }}</span></div>
+{% else %}<p class="empty">Create your first exam from the question bank.</p>{% endfor %}</section>
+{% endif %}
+{% endblock %}

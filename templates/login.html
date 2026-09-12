@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="login-shell">
+  <section class="login-card">
+    <div class="eyebrow">SECURE SCHOOL ASSESSMENT</div>
+    <h1>{{ school.school_name }}</h1>
+    <p class="muted">Professional computer-based testing and learning insight.</p>
+    <form method="post">
+      <label>Username<input name="username" required autofocus></label>
+      <label>Password<input name="password" type="password" required></label>
+      <button class="button primary wide">Sign in</button>
+    </form>
+    <p class="login-help">Demo: admin/admin123 · teacher/teacher123 · student/student123</p>
+  </section>
+</div>
+{% endblock %}
