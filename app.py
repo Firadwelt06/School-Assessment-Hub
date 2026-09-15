@@ -1350,6 +1350,18 @@ def toggle_access_code(code_id):
     return redirect(url_for("admin"))
 
 
+@app.post("/admin/access-codes/<int:code_id>/delete")
+@login_required("admin")
+def delete_access_code(code_id):
+    record = query("SELECT subject FROM subject_access_codes WHERE id = ?", (code_id,), one=True)
+    if not record:
+        flash("Access code not found.", "error")
+    else:
+        execute("DELETE FROM subject_access_codes WHERE id = ?", (code_id,))
+        flash(f"{record['subject']} access code was permanently deleted.", "success")
+    return redirect(url_for("admin"))
+
+
 @app.get("/uploads/<path:filename>")
 def uploads(filename):
     return send_file(UPLOAD_DIR / secure_filename(filename))
