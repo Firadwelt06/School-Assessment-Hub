@@ -83,6 +83,8 @@ Administrators can choose Ocean, Forest, Royal, Sunset, or Slate from **Administ
 
 Administrators can publish or unpublish exams and change each exam's type and duration from the administration page. Teachers and administrators can select multiple question-bank items when creating an exam, filter the bank by subject or class, and add illustrations to manually created or edited questions. Supported question images are PNG, JPG/JPEG, WEBP, and GIF.
 
+Staff can open **Performance Analytics** to view charts for average performance by class/cohort, subject, and exam type, plus score distribution, student count, submission count, average score, and pass rate. Teachers see only analytics for their assigned subjects; administrators see all available data. Charts use the browser's Chart.js CDN, so an offline LAN deployment should vendor Chart.js locally.
+
 The manual question editor also supports bulk entry: click **Add another question**, complete each question card, then click **Save all questions** to add them together.
 
 Teachers can be assigned subjects by an administrator or through the teacher registration page. Their question bank, exams, rankings, and CSV reports are limited to those subjects; administrators retain full visibility. Administrators can manage the subject and class categories from the Administration page. Students select a class during registration and only see published exams assigned to that class.
@@ -90,6 +92,22 @@ Teachers can be assigned subjects by an administrator or through the teacher reg
 Class categories use two levels: students are assigned to arm classes such as `SS1 A` and `SS1 B`, while teachers and exam/question filters use the general cohort `SS1`. Selecting `SS1` therefore includes both arms. Administrators manage the student arm list, and the application derives the general cohort automatically.
 
 Teacher and student registration is designed for supervised local-network sessions and does not ask for a password. For an internet-facing deployment, replace this with verified accounts or one-time access codes.
+
+New self-registered teachers do not have a user-facing password: the application creates a secure random internal credential and signs them in immediately. They should use the supervised registration page. Imported or administrator-created teachers continue to use the password supplied by the administrator or CSV.
+
+Administrators can generate a shared temporary access code for each subject. The same code can be given to teachers and students for that subject, and it remains valid until the configured expiry time or until disabled by the administrator. It is currently a time-limited shared code, not a single-use-per-person token.
+
+Formula rendering is enabled throughout question creation, editing, exam delivery, and review for all subjects. Use `\( ... \)` for inline formulas and `\[ ... \]` for display formulas.
+
+## Administrator safeguards
+
+Administrators can publish/unpublish or permanently remove exams, enable/disable users, and permanently remove non-administrator users. The danger-zone data reset removes application records while retaining the current administrator account. Set a strong `DATA_CLEAR_PASSWORD` environment variable before using it; the development fallback must be replaced.
+
+## Recommended improvements and limitations
+
+For a more professional production release, add administrator approval for self-registration, one-time access codes, CSRF protection, SQLite backups, scheduled exams, printable PDF report cards, question versioning, audit logs, and a proper database server for multiple concurrent users.
+
+The current LAN design may fail or become unreliable with many simultaneous students, unstable Wi-Fi, browser refreshes during submission, lost server power, scanned PDFs without OCR, duplicate names belonging to different people, or users sharing the same device/session. Passwordless registration is convenient for supervised testing but is not suitable for an untrusted network without access codes or approval.
 
 ## Result reports
 

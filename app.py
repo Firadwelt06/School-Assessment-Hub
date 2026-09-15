@@ -5,7 +5,8 @@ import os
 import re
 import secrets
 import sqlite3
-from datetime import datetime
+import unicodedata
+from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
 
@@ -39,6 +40,7 @@ ALLOWED_NOTES = {"pdf", "docx"}
 ALLOWED_LOGOS = {"png", "jpg", "jpeg", "webp"}
 ALLOWED_IMAGES = {"png", "jpg", "jpeg", "webp", "gif"}
 EXAM_TYPES = ("midterm", "final", "quiz", "practice", "mock", "assignment", "other")
+DATA_CLEAR_PASSWORD = os.getenv("DATA_CLEAR_PASSWORD", "change-this-clear-password")
 THEMES = {"ocean", "forest", "royal", "sunset", "slate"}
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "change-this-development-secret")
@@ -128,6 +130,11 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY, value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS subject_access_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, subject TEXT NOT NULL,
+            code TEXT NOT NULL, expires_at TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+            created_by INTEGER NOT NULL, created_at TEXT NOT NULL
         );
         """
     )
@@ -315,6 +322,31 @@ def class_arm_options():
 
 def class_matches(value, selected):
     return not selected or value == selected or class_group(value) == class_group(selected)
+
+
+def normalized_name(value):
+    return " ".join(unicodedata.normalize("NFKC", value or "").casefold().split())
+
+
+def valid_access_code(subject, code):
+    record = query(
+        "SELECT * FROM subject_access_codes WHERE subject = ? AND code = ? AND active = 1 ORDER BY id DESC",
+        (subject.strip(), code.strip().upper()), one=True,
+    )
+    if not record:
+        return False
+    try:
+        return datetime.now() <= datetime.fromisoformat(record["expires_at"])
+    except ValueError:
+        return False
+
+
+def find_student_by_name(full_name):
+    target = normalized_name(full_name)
+    return next(
+        (row for row in query("SELECT * FROM users WHERE role='student'") if normalized_name(row["full_name"]) == target),
+        None,
+    )
 
 
 def generate_local_questions(subject, topic, notes, count, difficulty):
@@ -516,8 +548,10 @@ def register_teacher():
         full_name = request.form["full_name"].strip()
         class_name = request.form["class_name"].strip()
         subjects = request.form["subjects"].strip()
-        if not full_name or not class_name or not subjects:
-            flash("Name, class, and at least one subject are required.", "error")
+        access_subject = request.form["access_subject"].strip()
+        access_code = request.form["access_code"].strip()
+        if not full_name or not class_name or not subjects or not valid_access_code(access_subject, access_code):
+            flash("Name, class, subjects, and a valid active subject access code are required.", "error")
         else:
             username = "teacher." + secrets.token_hex(5)
             user_id = execute(
@@ -527,27 +561,35 @@ def register_teacher():
             session["user_id"] = user_id
             flash("Teacher registration completed.", "success")
             return redirect(url_for("dashboard"))
-    return render_template("register_teacher.html", classes=class_group_options())
+    return render_template("register_teacher.html", classes=class_group_options(), subjects=category_values("managed_subjects", "SELECT DISTINCT subject AS value FROM questions ORDER BY subject"))
 
 
 @app.route("/register/student", methods=["GET", "POST"])
 def register_student():
     classes = class_arm_options()
+    subjects = category_values("managed_subjects", "SELECT DISTINCT subject AS value FROM questions ORDER BY subject")
     if request.method == "POST":
         full_name = request.form["full_name"].strip()
         class_name = request.form["class_name"].strip()
-        if not full_name or class_name not in classes:
-            flash("Enter your name and select a valid class.", "error")
+        access_subject = request.form["access_subject"].strip()
+        access_code = request.form["access_code"].strip()
+        if not full_name or class_name not in classes or not valid_access_code(access_subject, access_code):
+            flash("Enter your name, valid class, and active subject access code.", "error")
         else:
-            username = "student." + secrets.token_hex(5)
-            user_id = execute(
-                "INSERT INTO users(username, full_name, password_hash, role, class_name, created_at) VALUES (?, ?, ?, 'student', ?, ?)",
-                (username, full_name, hash_password(secrets.token_urlsafe(18)), class_name, datetime.now().isoformat(timespec="seconds")),
-            )
+            existing = find_student_by_name(full_name)
+            if existing:
+                execute("UPDATE users SET full_name=?, class_name=?, active=1 WHERE id=?", (full_name, class_name, existing["id"]))
+                user_id = existing["id"]
+            else:
+                username = "student." + secrets.token_hex(5)
+                user_id = execute(
+                    "INSERT INTO users(username, full_name, password_hash, role, class_name, created_at) VALUES (?, ?, ?, 'student', ?, ?)",
+                    (username, full_name, hash_password(secrets.token_urlsafe(18)), class_name, datetime.now().isoformat(timespec="seconds")),
+                )
             session["user_id"] = user_id
-            flash("Student registration completed.", "success")
+            flash("Student record updated. Continue to your examinations.", "success")
             return redirect(url_for("dashboard"))
-    return render_template("register_student.html", classes=classes)
+    return render_template("register_student.html", classes=classes, subjects=subjects)
 
 
 @app.get("/logout")
@@ -780,6 +822,33 @@ def delete_user(user_id):
     return redirect(url_for("admin"))
 
 
+@app.post("/admin/users/<int:user_id>/status")
+@login_required("admin")
+def update_user_status(user_id):
+    account = query("SELECT role, active FROM users WHERE id = ?", (user_id,), one=True)
+    if not account or account["role"] == "admin":
+        flash("Only teacher and student accounts can be managed here.", "error")
+    else:
+        execute("UPDATE users SET active = ? WHERE id = ?", (int(request.form.get("active") == "1"), user_id))
+        flash("User access updated.", "success")
+    return redirect(url_for("admin"))
+
+
+@app.post("/admin/users/<int:user_id>/remove")
+@login_required("admin")
+def remove_user(user_id):
+    account = query("SELECT role FROM users WHERE id = ?", (user_id,), one=True)
+    if not account or account["role"] == "admin" or user_id == current_user()["id"]:
+        flash("This administrator account cannot be permanently removed here.", "error")
+    else:
+        execute("DELETE FROM responses WHERE attempt_id IN (SELECT id FROM attempts WHERE student_id = ?)", (user_id,))
+        execute("DELETE FROM rewrite_permissions WHERE attempt_id IN (SELECT id FROM attempts WHERE student_id = ?)", (user_id,))
+        execute("DELETE FROM attempts WHERE student_id = ?", (user_id,))
+        execute("DELETE FROM users WHERE id = ?", (user_id,))
+        flash("User permanently removed.", "success")
+    return redirect(url_for("admin"))
+
+
 @app.post("/admin/exams/<int:exam_id>/publish")
 @login_required("admin")
 def publish_exam(exam_id):
@@ -789,6 +858,22 @@ def publish_exam(exam_id):
     else:
         execute("UPDATE exams SET published = ? WHERE id = ?", (int(not exam["published"]), exam_id))
         flash(f"{exam['title']} is now {'published' if not exam['published'] else 'unpublished'}.", "success")
+    return redirect(url_for("admin"))
+
+
+@app.post("/admin/exams/<int:exam_id>/remove")
+@login_required("admin")
+def remove_exam(exam_id):
+    exam = query("SELECT title FROM exams WHERE id = ?", (exam_id,), one=True)
+    if not exam:
+        flash("Exam not found.", "error")
+    else:
+        execute("DELETE FROM responses WHERE attempt_id IN (SELECT id FROM attempts WHERE exam_id = ?)", (exam_id,))
+        execute("DELETE FROM rewrite_permissions WHERE attempt_id IN (SELECT id FROM attempts WHERE exam_id = ?)", (exam_id,))
+        execute("DELETE FROM attempts WHERE exam_id = ?", (exam_id,))
+        execute("DELETE FROM exam_questions WHERE exam_id = ?", (exam_id,))
+        execute("DELETE FROM exams WHERE id = ?", (exam_id,))
+        flash(f"{exam['title']} was permanently removed.", "success")
     return redirect(url_for("admin"))
 
 
@@ -953,6 +1038,65 @@ def rankings():
     )
 
 
+@app.route("/analytics")
+@login_required("admin", "teacher")
+def analytics():
+    class_filter = request.args.get("class_name", "").strip()
+    subject_filter = request.args.get("subject", "").strip()
+    exam_type_filter = request.args.get("exam_type", "").strip()
+    rows = query(
+        """SELECT u.full_name, u.class_name, e.subject, e.exam_type,
+        a.score, a.total
+        FROM attempts a
+        JOIN users u ON u.id = a.student_id
+        JOIN exams e ON e.id = a.exam_id
+        WHERE u.role = 'student' AND a.submitted_at != ''"""
+    )
+    records = [dict(row) for row in rows]
+    user = current_user()
+    if user["role"] == "teacher":
+        records = [row for row in records if row["subject"] in teacher_subjects(user)]
+    if class_filter:
+        records = [row for row in records if class_matches(row["class_name"], class_filter)]
+    if subject_filter:
+        records = [row for row in records if row["subject"] == subject_filter]
+    if exam_type_filter in EXAM_TYPES:
+        records = [row for row in records if row["exam_type"] == exam_type_filter]
+    frame = pd.DataFrame(records)
+    if frame.empty:
+        class_chart, subject_chart, type_chart, distribution = [], [], [], []
+        stats = {"students": 0, "submissions": 0, "average": 0, "pass_rate": 0}
+    else:
+        frame["percentage"] = (frame["score"] / frame["total"] * 100).round(1)
+        class_chart = frame.groupby(frame["class_name"].map(class_group), as_index=False).agg(
+            average=("percentage", "mean"), submissions=("percentage", "count")
+        ).round(1).to_dict("records")
+        class_chart = [{"label": row["class_name"], "average": row["average"], "submissions": row["submissions"]} for row in class_chart]
+        subject_chart = frame.groupby("subject", as_index=False).agg(
+            average=("percentage", "mean"), submissions=("percentage", "count")
+        ).round(1).to_dict("records")
+        type_chart = frame.groupby("exam_type", as_index=False).agg(
+            average=("percentage", "mean"), submissions=("percentage", "count")
+        ).round(1).to_dict("records")
+        bins = pd.cut(frame["percentage"], bins=[-1, 39, 49, 59, 69, 100], labels=["0-39", "40-49", "50-59", "60-69", "70-100"])
+        distribution = [{"label": str(label), "count": int((bins == label).sum())} for label in bins.cat.categories]
+        stats = {
+            "students": int(frame["full_name"].nunique()),
+            "submissions": int(len(frame)),
+            "average": round(float(frame["percentage"].mean()), 1),
+            "pass_rate": round(float((frame["percentage"] >= 50).mean() * 100), 1),
+        }
+    return render_template(
+        "analytics.html",
+        class_chart=class_chart, subject_chart=subject_chart,
+        type_chart=type_chart, distribution=distribution, stats=stats,
+        classes=sorted(set([row["class_name"] for row in query("SELECT DISTINCT class_name FROM users WHERE role='student' AND class_name != ''")] + class_group_options())),
+        subjects=teacher_subjects(user) if user["role"] == "teacher" else category_values("managed_subjects", "SELECT DISTINCT subject AS value FROM questions ORDER BY subject"),
+        exam_types=EXAM_TYPES, class_filter=class_filter,
+        subject_filter=subject_filter, exam_type_filter=exam_type_filter,
+    )
+
+
 @app.get("/reports/results.csv")
 @login_required("admin", "teacher")
 def results_csv():
@@ -1065,12 +1209,18 @@ def admin():
                     for row in frame.to_dict("records"):
                         username = str(row.get("username", "")).strip()
                         full_name = str(row["full_name"]).strip()
+                        class_name = str(row["class_name"]).strip()
+                        existing = find_student_by_name(full_name)
+                        if existing:
+                            execute("UPDATE users SET full_name=?, class_name=?, active=1 WHERE id=?", (full_name, class_name, existing["id"]))
+                            created += 1
+                            continue
                         if not username:
                             username = re.sub(r"[^a-z0-9]+", ".", full_name.lower()).strip(".")
                         execute(
                             """INSERT INTO users(username, full_name, password_hash, role, class_name, created_at)
                             VALUES (?, ?, ?, 'student', ?, ?)""",
-                            (username, full_name, hash_password(str(row["password"])), str(row["class_name"]).strip(), datetime.now().isoformat(timespec="seconds")),
+                            (username, full_name, hash_password(str(row["password"])), class_name, datetime.now().isoformat(timespec="seconds")),
                         )
                         created += 1
                     flash(f"Imported {created} students.", "success")
@@ -1117,7 +1267,45 @@ def admin():
             execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('managed_subjects', ?)", (subjects,))
             execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('managed_classes', ?)", (classes,))
             flash("Subject and class categories updated.", "success")
+        elif action == "access_code":
+            subject = request.form.get("access_subject", "").strip()
+            try:
+                duration_hours = float(request.form.get("duration_hours", "24"))
+                if not subject or duration_hours <= 0 or duration_hours > 720:
+                    raise ValueError
+                code = secrets.token_urlsafe(8).replace("-", "").replace("_", "").upper()[:10]
+                expires_at = datetime.now() + timedelta(hours=duration_hours)
+                execute(
+                    "INSERT INTO subject_access_codes(subject, code, expires_at, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (subject, code, expires_at.isoformat(timespec="seconds"), current_user()["id"], datetime.now().isoformat(timespec="seconds")),
+                )
+                flash(f"Access code for {subject}: {code} (expires {expires_at.strftime('%Y-%m-%d %H:%M')}).", "success")
+            except ValueError:
+                flash("Enter a subject and a duration between 0 and 720 hours.", "error")
+        elif action == "clear_data":
+            if not secrets.compare_digest(request.form.get("clear_password", ""), DATA_CLEAR_PASSWORD):
+                flash("The special data-clear password is incorrect.", "error")
+            else:
+                admin_id = current_user()["id"]
+                connection = db()
+                connection.executescript(
+                    """
+                    DELETE FROM responses;
+                    DELETE FROM rewrite_permissions;
+                    DELETE FROM attempts;
+                    DELETE FROM exam_questions;
+                    DELETE FROM exams;
+                    DELETE FROM questions;
+                    DELETE FROM subject_access_codes;
+                    DELETE FROM users WHERE id != %d;
+                    DELETE FROM settings;
+                    """ % admin_id
+                )
+                connection.commit()
+                connection.close()
+                flash("All application data was cleared. The current administrator account was retained.", "success")
         return redirect(url_for("admin"))
+
     role_filter = request.args.get("role", "").strip()
     class_filter = request.args.get("class_name", "").strip()
     user_sql = "SELECT id, username, full_name, role, class_name, subjects, active FROM users WHERE role != 'admin'"
@@ -1144,9 +1332,22 @@ def admin():
         exam_classes=class_group_options(),
         managed_subjects=category_values("managed_subjects", "SELECT DISTINCT subject AS value FROM questions ORDER BY subject"),
         managed_classes=class_options(),
+        access_codes=query("SELECT * FROM subject_access_codes ORDER BY id DESC"),
         exams=query("SELECT id, title, subject, class_name, exam_type, duration_minutes, published FROM exams ORDER BY id DESC"),
         exam_types=EXAM_TYPES,
     )
+
+
+@app.post("/admin/access-codes/<int:code_id>/toggle")
+@login_required("admin")
+def toggle_access_code(code_id):
+    record = query("SELECT active, subject FROM subject_access_codes WHERE id = ?", (code_id,), one=True)
+    if not record:
+        flash("Access code not found.", "error")
+    else:
+        execute("UPDATE subject_access_codes SET active = ? WHERE id = ?", (int(not record["active"]), code_id))
+        flash(f"{record['subject']} access code {'enabled' if not record['active'] else 'disabled'}.", "success")
+    return redirect(url_for("admin"))
 
 
 @app.get("/uploads/<path:filename>")

@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="topbar"><div><div class="eyebrow">SCHOOL PERFORMANCE</div><h1>Performance analytics</h1><p class="muted">Visualize completed student submissions by cohort, subject, exam type, and score range.</p></div></div>
+<form class="filter-bar inline-filters"><label>Class/cohort<select name="class_name" onchange="this.form.submit()"><option value="">All classes</option>{% for value in classes %}<option value="{{ value }}" {% if class_filter == value %}selected{% endif %}>{{ value }}</option>{% endfor %}</select></label><label>Subject<select name="subject" onchange="this.form.submit()"><option value="">All subjects</option>{% for value in subjects %}<option value="{{ value }}" {% if subject_filter == value %}selected{% endif %}>{{ value }}</option>{% endfor %}</select></label><label>Exam type<select name="exam_type" onchange="this.form.submit()"><option value="">All exam types</option>{% for value in exam_types %}<option value="{{ value }}" {% if exam_type_filter == value %}selected{% endif %}>{{ value|capitalize }}</option>{% endfor %}</select></label></form>
+<div class="stats"><div class="stat"><span>Students represented</span><strong>{{ stats.students }}</strong></div><div class="stat"><span>Completed submissions</span><strong>{{ stats.submissions }}</strong></div><div class="stat"><span>Average score</span><strong>{{ stats.average }}%</strong></div><div class="stat"><span>Pass rate</span><strong>{{ stats.pass_rate }}%</strong></div></div>
+<div class="chart-grid"><section class="panel chart-panel"><h2>Average by class/cohort</h2><canvas id="class-chart"></canvas></section><section class="panel chart-panel"><h2>Average by subject</h2><canvas id="subject-chart"></canvas></section><section class="panel chart-panel"><h2>Average by exam type</h2><canvas id="type-chart"></canvas></section><section class="panel chart-panel"><h2>Score distribution</h2><canvas id="distribution-chart"></canvas></section></div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+const charts = {
+  classChart: {{ class_chart|tojson }},
+  subjectChart: {{ subject_chart|tojson }},
+  typeChart: {{ type_chart|tojson }},
+  distribution: {{ distribution|tojson }}
+};
+const bar = (id, rows, label) => new Chart(document.getElementById(id), {
+  type: "bar",
+  data: {labels: rows.map(row => row.label || row.subject || row.exam_type), datasets: [{label, data: rows.map(row => row.average), backgroundColor: "#1769aa"}]},
+  options: {responsive: true, scales: {y: {beginAtZero: true, max: 100, ticks: {callback: value => value + "%"}}}}
+});
+bar("class-chart", charts.classChart, "Average percentage");
+bar("subject-chart", charts.subjectChart, "Average percentage");
+bar("type-chart", charts.typeChart, "Average percentage");
+new Chart(document.getElementById("distribution-chart"), {
+  type: "doughnut",
+  data: {labels: charts.distribution.map(row => row.label), datasets: [{label: "Submissions", data: charts.distribution.map(row => row.count), backgroundColor: ["#b42318", "#d97745", "#9a6700", "#2f855a", "#1769aa"]}]},
+  options: {responsive: true}
+});
+</script>
+{% endblock %}

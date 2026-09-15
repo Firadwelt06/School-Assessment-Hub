@@ -27,6 +27,7 @@
     <a href="{{ url_for('questions') }}">Question Bank</a>
     <a href="{{ url_for('new_exam') }}">Create Exam</a>
     <a href="{{ url_for('rankings') }}">Student Rankings</a>
+    <a href="{{ url_for('analytics') }}">Performance Analytics</a>
     {% endif %}
     {% if user.role == 'admin' %}<a href="{{ url_for('admin') }}">Administration</a>{% endif %}
   </nav>

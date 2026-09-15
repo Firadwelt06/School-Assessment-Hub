@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="topbar"><div><div class="eyebrow">CONTENT STUDIO</div><h1>Edit question</h1><p class="muted">Review and manually correct the generated question before using it in an examination.</p></div></div>
+<div class="topbar"><div><div class="eyebrow">CONTENT STUDIO</div><h1>Edit question</h1><p class="muted">Review and manually correct the generated question before using it in an examination. Formula text is rendered in every subject; use <code>\(...\)</code> for inline notation or <code>\[...\]</code> for display notation.</p></div></div>
 <form method="post" enctype="multipart/form-data" class="panel">
   <div class="form-grid">
     <label>Subject<input name="subject" value="{{ question.subject }}" required></label>
