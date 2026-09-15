@@ -30,9 +30,19 @@ try:
 except ImportError:
     PdfReader = None
 
+try:
+    import pymysql
+    from pymysql.cursors import DictCursor
+except ImportError:
+    pymysql = None
+    DictCursor = None
+
+DBIntegrityError = (sqlite3.IntegrityError, pymysql.err.IntegrityError) if pymysql else (sqlite3.IntegrityError,)
+
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
+DB_ENGINE = os.getenv("DB_ENGINE", "sqlite").lower()
 DB_PATH = os.getenv("DATABASE_PATH", str(BASE_DIR / "assessment.db"))
 UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -47,25 +57,61 @@ app.secret_key = os.getenv("FLASK_SECRET_KEY", "change-this-development-secret")
 
 
 def db():
+    if DB_ENGINE == "mysql":
+        if pymysql is None:
+            raise RuntimeError("DB_ENGINE=mysql requires the PyMySQL package. Run: python -m pip install PyMySQL")
+        return pymysql.connect(
+            host=os.getenv("MYSQL_HOST", "127.0.0.1"),
+            port=int(os.getenv("MYSQL_PORT", "3306")),
+            user=os.getenv("MYSQL_USER", "root"),
+            password=os.getenv("MYSQL_PASSWORD", ""),
+            database=os.getenv("MYSQL_DATABASE", "school_assessment"),
+            charset="utf8mb4",
+            cursorclass=DictCursor,
+            autocommit=False,
+        )
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     return connection
 
 
+def sql_params(sql):
+    return sql.replace("?", "%s") if DB_ENGINE == "mysql" else sql
+
+
 def query(sql, params=(), one=False):
     connection = db()
-    rows = connection.execute(sql, params).fetchall()
+    if DB_ENGINE == "mysql":
+        with connection.cursor() as cursor:
+            cursor.execute(sql_params(sql), params)
+            rows = cursor.fetchall()
+    else:
+        rows = connection.execute(sql, params).fetchall()
     connection.close()
     return (rows[0] if rows else None) if one else rows
 
 
 def execute(sql, params=()):
     connection = db()
-    cursor = connection.execute(sql, params)
+    if DB_ENGINE == "mysql":
+        cursor = connection.cursor()
+        cursor.execute(sql_params(sql), params)
+    else:
+        cursor = connection.execute(sql, params)
     connection.commit()
     last_id = cursor.lastrowid
     connection.close()
     return last_id
+
+
+def upsert_setting(key, value):
+    if DB_ENGINE == "mysql":
+        execute(
+            "INSERT INTO settings(`key`, `value`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)",
+            (key, value),
+        )
+    else:
+        execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (key, value))
 
 
 def hash_password(password):
@@ -83,7 +129,82 @@ def check_password(password, stored):
         return False
 
 
+def init_mysql_db():
+    connection = db()
+    statements = [
+        """CREATE TABLE IF NOT EXISTS users (
+            id INT PRIMARY KEY AUTO_INCREMENT, username VARCHAR(255) UNIQUE NOT NULL,
+            full_name VARCHAR(255) NOT NULL, password_hash TEXT NOT NULL,
+            role ENUM('admin', 'teacher', 'student') NOT NULL,
+            class_name VARCHAR(255) NOT NULL DEFAULT '', subjects VARCHAR(2000) NOT NULL DEFAULT '',
+            active TINYINT NOT NULL DEFAULT 1, created_at VARCHAR( forty ) NOT NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""".replace("VARCHAR( forty )", "VARCHAR(40)"),
+        """CREATE TABLE IF NOT EXISTS questions (
+            id INT PRIMARY KEY AUTO_INCREMENT, subject VARCHAR(255) NOT NULL DEFAULT 'General',
+            topic TEXT NOT NULL, class_name VARCHAR(255) NOT NULL DEFAULT '', image_path TEXT NOT NULL,
+            stem TEXT NOT NULL, option_a TEXT NOT NULL, option_b TEXT NOT NULL,
+            option_c TEXT NOT NULL, option_d TEXT NOT NULL, correct_option VARCHAR(10) NOT NULL,
+            difficulty VARCHAR(20) NOT NULL DEFAULT 'medium', explanation TEXT, standard TEXT,
+            created_by INT NULL, created_at VARCHAR(40) NOT NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+        """CREATE TABLE IF NOT EXISTS exams (
+            id INT PRIMARY KEY AUTO_INCREMENT, title VARCHAR(255) NOT NULL,
+            subject VARCHAR(255) NOT NULL DEFAULT 'General', class_name VARCHAR(255) NOT NULL DEFAULT '',
+            exam_type VARCHAR(40) NOT NULL DEFAULT 'other', instructions TEXT,
+            duration_minutes INT NOT NULL DEFAULT 60, created_by INT NOT NULL,
+            published TINYINT NOT NULL DEFAULT 0, created_at VARCHAR(40) NOT NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+        """CREATE TABLE IF NOT EXISTS exam_questions (
+            exam_id INT NOT NULL, question_id INT NOT NULL, position INT NOT NULL,
+            PRIMARY KEY (exam_id, question_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+        """CREATE TABLE IF NOT EXISTS attempts (
+            id INT PRIMARY KEY AUTO_INCREMENT, exam_id INT NOT NULL, student_id INT NOT NULL,
+            score DOUBLE NOT NULL, total INT NOT NULL, started_at VARCHAR(40) NOT NULL,
+            submitted_at VARCHAR(40) NOT NULL, UNIQUE KEY unique_attempt (exam_id, student_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+        """CREATE TABLE IF NOT EXISTS responses (
+            attempt_id INT NOT NULL, question_id INT NOT NULL, answer VARCHAR(10),
+            correct TINYINT NOT NULL, PRIMARY KEY (attempt_id, question_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+        """CREATE TABLE IF NOT EXISTS rewrite_permissions (
+            id INT PRIMARY KEY AUTO_INCREMENT, attempt_id INT NOT NULL, granted_by INT NOT NULL,
+            granted_at VARCHAR(40) NOT NULL, UNIQUE KEY unique_permission (attempt_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+        """CREATE TABLE IF NOT EXISTS settings (
+            `key` VARCHAR(255) PRIMARY KEY, `value` TEXT NOT NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+        """CREATE TABLE IF NOT EXISTS subject_access_codes (
+            id INT PRIMARY KEY AUTO_INCREMENT, subject VARCHAR(255) NOT NULL, code VARCHAR(100) NOT NULL,
+            expires_at VARCHAR(40) NOT NULL, active TINYINT NOT NULL DEFAULT 1,
+            created_by INT NOT NULL, created_at VARCHAR(40) NOT NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+    ]
+    try:
+        with connection.cursor() as cursor:
+            for statement in statements:
+                cursor.execute(statement)
+            cursor.execute("SELECT COUNT(*) AS count FROM users")
+            if cursor.fetchone()["count"] == 0:
+                now = datetime.now().isoformat(timespec="seconds")
+                cursor.executemany(
+                    """INSERT INTO users(username, full_name, password_hash, role, class_name, subjects, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    [
+                        ("admin", "System Administrator", hash_password("admin123"), "admin", "", "", now),
+                        ("teacher", "Demo Teacher", hash_password("teacher123"), "teacher", "", "", now),
+                        ("student", "Demo Student", hash_password("student123"), "student", "Demo Class", "", now),
+                    ],
+                )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def init_db():
+    if DB_ENGINE == "mysql":
+        init_mysql_db()
+        return
     connection = db()
     connection.executescript(
         """
@@ -247,7 +368,7 @@ def school_settings():
         "school_name": "School Assessment Hub", "school_address": "", "school_logo": "",
         "theme": "ocean", "theme_image": "",
     }
-    values.update({row["key"]: row["value"] for row in query("SELECT key, value FROM settings")})
+    values.update({row["key"]: row["value"] for row in query("SELECT `key`, `value` FROM settings")})
     return values
 
 
@@ -1015,10 +1136,17 @@ def grant_rewrite(attempt_id):
     if not attempt:
         flash("Attempt not found.", "error")
     else:
-        execute(
-            "INSERT OR REPLACE INTO rewrite_permissions(attempt_id, granted_by, granted_at) VALUES (?, ?, ?)",
-            (attempt_id, current_user()["id"], datetime.now().isoformat(timespec="seconds")),
-        )
+        if DB_ENGINE == "mysql":
+            execute(
+                """INSERT INTO rewrite_permissions(attempt_id, granted_by, granted_at)
+                VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE granted_by = VALUES(granted_by), granted_at = VALUES(granted_at)""",
+                (attempt_id, current_user()["id"], datetime.now().isoformat(timespec="seconds")),
+            )
+        else:
+            execute(
+                "INSERT OR REPLACE INTO rewrite_permissions(attempt_id, granted_by, granted_at) VALUES (?, ?, ?)",
+                (attempt_id, current_user()["id"], datetime.now().isoformat(timespec="seconds")),
+            )
         flash(f"Rewrite access granted to {attempt['full_name']} for {attempt['title']}.", "success")
     return redirect(url_for("admin"))
 
@@ -1184,16 +1312,16 @@ def admin():
                 theme_upload.save(UPLOAD_DIR / theme_image)
                 theme = "image"
             for key in ("school_name", "school_address"):
-                execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (key, request.form[key].strip()))
-            execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", ("school_logo", logo_name))
-            execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", ("theme", theme))
-            execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", ("theme_image", theme_image))
+                upsert_setting(key, request.form[key].strip())
+                upsert_setting("school_logo", logo_name)
+                upsert_setting("theme", theme)
+                upsert_setting("theme_image", theme_image)
             flash("School branding updated.", "success")
         elif action == "user":
             try:
                 execute("INSERT INTO users(username, full_name, password_hash, role, class_name, subjects, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", (request.form["username"], request.form["full_name"], hash_password(request.form["password"]), request.form["role"], request.form.get("class_name", "").strip(), request.form.get("subjects", "").strip(), datetime.now().isoformat(timespec="seconds")))
                 flash("User created.", "success")
-            except sqlite3.IntegrityError:
+            except DBIntegrityError:
                 flash("Username already exists.", "error")
         elif action == "students_csv":
             upload = request.files.get("students_csv")
@@ -1224,7 +1352,7 @@ def admin():
                         )
                         created += 1
                     flash(f"Imported {created} students.", "success")
-                except (ValueError, KeyError, sqlite3.IntegrityError) as error:
+                except (ValueError, KeyError, DBIntegrityError) as error:
                     flash(f"Student CSV import failed: {error}", "error")
         elif action == "teachers_csv":
             upload = request.files.get("teachers_csv")
@@ -1247,7 +1375,7 @@ def admin():
                         )
                         created += 1
                     flash(f"Imported {created} teachers.", "success")
-                except (ValueError, KeyError, sqlite3.IntegrityError) as error:
+                except (ValueError, KeyError, DBIntegrityError) as error:
                     flash(f"Teacher CSV import failed: {error}", "error")
         elif action == "exam_settings":
             try:
@@ -1264,8 +1392,8 @@ def admin():
         elif action == "categories":
             subjects = ",".join(sorted({value.strip() for value in request.form.get("subjects", "").split(",") if value.strip()}))
             classes = ",".join(sorted({value.strip() for value in request.form.get("classes", "").split(",") if value.strip()}))
-            execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('managed_subjects', ?)", (subjects,))
-            execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('managed_classes', ?)", (classes,))
+            upsert_setting("managed_subjects", subjects)
+            upsert_setting("managed_classes", classes)
             flash("Subject and class categories updated.", "success")
         elif action == "access_code":
             subject = request.form.get("access_subject", "").strip()
@@ -1288,19 +1416,35 @@ def admin():
             else:
                 admin_id = current_user()["id"]
                 connection = db()
-                connection.executescript(
-                    """
-                    DELETE FROM responses;
-                    DELETE FROM rewrite_permissions;
-                    DELETE FROM attempts;
-                    DELETE FROM exam_questions;
-                    DELETE FROM exams;
-                    DELETE FROM questions;
-                    DELETE FROM subject_access_codes;
-                    DELETE FROM users WHERE id != %d;
-                    DELETE FROM settings;
-                    """ % admin_id
-                )
+                statements = [
+                    "DELETE FROM responses",
+                    "DELETE FROM rewrite_permissions",
+                    "DELETE FROM attempts",
+                    "DELETE FROM exam_questions",
+                    "DELETE FROM exams",
+                    "DELETE FROM questions",
+                    "DELETE FROM subject_access_codes",
+                    "DELETE FROM users WHERE id != ?",
+                    "DELETE FROM settings",
+                ]
+                if DB_ENGINE == "mysql":
+                    with connection.cursor() as cursor:
+                        for statement in statements:
+                            cursor.execute(sql_params(statement), (admin_id,) if "users WHERE" in statement else ())
+                else:
+                    connection.executescript(
+                        """
+                        DELETE FROM responses;
+                        DELETE FROM rewrite_permissions;
+                        DELETE FROM attempts;
+                        DELETE FROM exam_questions;
+                        DELETE FROM exams;
+                        DELETE FROM questions;
+                        DELETE FROM subject_access_codes;
+                        DELETE FROM users WHERE id != %d;
+                        DELETE FROM settings;
+                        """ % admin_id
+                    )
                 connection.commit()
                 connection.close()
                 flash("All application data was cleared. The current administrator account was retained.", "success")
@@ -1370,4 +1514,10 @@ def uploads(filename):
 init_db()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=os.getenv("FLASK_DEBUG") == "1")
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "5000"))
+    if os.getenv("FLASK_DEBUG") == "1":
+        app.run(host=host, port=port, debug=True)
+    else:
+        from waitress import serve
+        serve(app, host=host, port=port, threads=int(os.getenv("WAITRESS_THREADS", "8")))

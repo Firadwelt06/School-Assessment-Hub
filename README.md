@@ -16,7 +16,7 @@ A professional Flask-based local-network CBT platform for schools.
 - Administrator-controlled exam rewrite permissions.
 - CSV import for teachers and students.
 - Subject, topic, and class metadata on every question.
-- SQLite storage for a simple school LAN deployment.
+- MySQL storage for reliable multi-user school LAN deployment.
 
 ## Run locally
 
@@ -34,12 +34,50 @@ You can alternatively create a `.env` file in the project folder:
 FLASK_SECRET_KEY=replace-with-a-long-random-value
 GEMINI_API_KEY=your-gemini-key
 GEMINI_MODEL=gemini-3.6-flash
-DATABASE_PATH=assessment.db
+DB_ENGINE=mysql
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_DATABASE=school_assessment
+MYSQL_USER=school_app
+MYSQL_PASSWORD=replace_with_mysql_password
+HOST=0.0.0.0
+PORT=5000
+WAITRESS_THREADS=8
 ```
 
-Restart `python app.py` after changing `.env`; environment variables are read when the process starts.
+Restart `python app.py` after changing `.env`; environment variables are read when the process starts. In normal mode, `python app.py` now starts the Waitress production WSGI server. Set `FLASK_DEBUG=1` only for development.
 
 Open `http://localhost:5000`. The Flask server binds to `0.0.0.0`, so other staff and students on the same Wi-Fi/LAN can use the host computer's LAN IP, for example `http://192.168.1.20:5000`. Allow Python/port 5000 through Windows Firewall when prompted. Everyone must be connected to the same private network; guest Wi-Fi isolation can prevent devices from seeing the host.
+
+## First-time MySQL setup on Windows
+
+Open MySQL Workbench or the MySQL command line and create the database and application user. Replace the example password with your own strong password:
+
+```sql
+CREATE DATABASE school_assessment CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE OR REPLACE USER 'school_app'@'localhost' IDENTIFIED BY 'replace_with_mysql_password';
+GRANT ALL PRIVILEGES ON school_assessment.* TO 'school_app'@'localhost';
+FLUSH PRIVILEGES;
+```
+
+Copy `.env.example` to `.env`, fill in the MySQL password, and keep `DB_ENGINE=mysql`. On the first start, the application creates its tables automatically:
+
+```powershell
+Copy-Item .env.example .env
+python -m pip install -r requirements.txt
+python app.py
+```
+
+If you already have data in `assessment.db`, stop the application, configure `.env` for MySQL, start it once to create the tables, stop it, and then run:
+
+```powershell
+python migrate_sqlite_to_mysql.py assessment.db
+python app.py
+```
+
+The migration replaces the records in the configured MySQL tables with the records from the SQLite file. Keep the original `assessment.db` as a backup until you have checked users, questions, exams, attempts, reports, and settings.
+
+For other computers on the LAN, open `http://SERVER-IP:5000`. Find the server address with `ipconfig`. The Windows Firewall must allow inbound TCP port 5000.
 
 Demo accounts:
 
@@ -105,7 +143,7 @@ Administrators can publish/unpublish or permanently remove exams, enable/disable
 
 ## Recommended improvements and limitations
 
-For a more professional production release, add administrator approval for self-registration, one-time access codes, CSRF protection, SQLite backups, scheduled exams, printable PDF report cards, question versioning, audit logs, and a proper database server for multiple concurrent users.
+For a more professional production release, add administrator approval for self-registration, CSRF protection, scheduled exams, printable PDF report cards, question versioning, audit logs, HTTPS, and automated MySQL backups.
 
 The current LAN design may fail or become unreliable with many simultaneous students, unstable Wi-Fi, browser refreshes during submission, lost server power, scanned PDFs without OCR, duplicate names belonging to different people, or users sharing the same device/session. Passwordless registration is convenient for supervised testing but is not suitable for an untrusted network without access codes or approval.
 
@@ -156,4 +194,3 @@ Carbon dioxide and water are raw materials...
 ```
 
 If the application reports `local (GEMINI_API_KEY is not set)`, the running Flask process cannot see the environment variable. Set it in the same PowerShell window before running `python app.py`. If it reports `local fallback (Gemini error: ...)`, the key was seen but the Gemini request or response failed; the message now includes the reason.
-
