@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import os
 import re
@@ -88,7 +89,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
             full_name TEXT NOT NULL, password_hash TEXT NOT NULL,
             role TEXT NOT NULL CHECK(role IN ('admin', 'teacher', 'student')),
-            class_name TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1,
+            class_name TEXT NOT NULL DEFAULT '', subjects TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS questions (
@@ -102,7 +103,8 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS exams (
             id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
-            subject TEXT NOT NULL DEFAULT 'General', exam_type TEXT NOT NULL DEFAULT 'other', instructions TEXT,
+            subject TEXT NOT NULL DEFAULT 'General', class_name TEXT NOT NULL DEFAULT '',
+            exam_type TEXT NOT NULL DEFAULT 'other', instructions TEXT,
             duration_minutes INTEGER NOT NULL DEFAULT 60, created_by INTEGER NOT NULL,
             published INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
         );
@@ -140,7 +142,17 @@ def init_db():
         connection.execute("ALTER TABLE questions ADD COLUMN image_path TEXT NOT NULL DEFAULT ''")
     user_columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
     if "class_name" not in user_columns:
-        connection.execute("ALTER TABLE users ADD COLUMN class_name TEXT NOT NULL DEFAULT ''")
+        try:
+            connection.execute("ALTER TABLE users ADD COLUMN class_name TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError as error:
+            if "duplicate column name" not in str(error).lower():
+                raise
+    if "subjects" not in user_columns:
+        try:
+            connection.execute("ALTER TABLE users ADD COLUMN subjects TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError as error:
+            if "duplicate column name" not in str(error).lower():
+                raise
     exam_columns = {row["name"] for row in connection.execute("PRAGMA table_info(exams)").fetchall()}
     attempt_columns = {row["name"] for row in connection.execute("PRAGMA table_info(attempts)").fetchall()}
     if "started_at" not in attempt_columns:
@@ -151,6 +163,28 @@ def init_db():
         connection.execute("ALTER TABLE exams ADD COLUMN duration_minutes INTEGER NOT NULL DEFAULT 60")
     if "exam_type" not in exam_columns:
         connection.execute("ALTER TABLE exams ADD COLUMN exam_type TEXT NOT NULL DEFAULT 'other'")
+    if "class_name" not in exam_columns:
+        try:
+            connection.execute("ALTER TABLE exams ADD COLUMN class_name TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError as error:
+            if "duplicate column name" not in str(error).lower():
+                raise
+    connection.execute(
+        """UPDATE exams SET class_name = (
+            SELECT q.class_name FROM exam_questions eq
+            JOIN questions q ON q.id = eq.question_id
+            WHERE eq.exam_id = exams.id AND q.class_name != ''
+            ORDER BY eq.position LIMIT 1
+        ) WHERE class_name = '' AND EXISTS (
+            SELECT 1 FROM exam_questions eq2
+            JOIN questions q2 ON q2.id = eq2.question_id
+            WHERE eq2.exam_id = exams.id AND q2.class_name != ''
+        )"""
+    )
+    for exam_row in connection.execute("SELECT id, class_name FROM exams WHERE class_name != ''").fetchall():
+        normalized_class = class_group(exam_row["class_name"])
+        if normalized_class != exam_row["class_name"]:
+            connection.execute("UPDATE exams SET class_name = ? WHERE id = ?", (normalized_class, exam_row["id"]))
     if connection.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
         now = datetime.now().isoformat(timespec="seconds")
         connection.executemany(
@@ -168,6 +202,22 @@ def init_db():
 def current_user():
     user_id = session.get("user_id")
     return query("SELECT * FROM users WHERE id = ? AND active = 1", (user_id,), one=True) if user_id else None
+
+
+def teacher_subjects(user=None):
+    user = user or current_user()
+    if not user or user["role"] != "teacher":
+        return []
+    return [value.strip() for value in (user["subjects"] or "").split(",") if value.strip()]
+
+
+def scoped_question_sql(user):
+    if user["role"] == "teacher" and teacher_subjects(user):
+        placeholders = ",".join("?" for _ in teacher_subjects(user))
+        return f" AND (created_by = ? OR subject IN ({placeholders}))", [user["id"], *teacher_subjects(user)]
+    if user["role"] == "teacher":
+        return " AND created_by = ?", [user["id"]]
+    return "", []
 
 
 def login_required(*roles):
@@ -192,6 +242,13 @@ def school_settings():
     }
     values.update({row["key"]: row["value"] for row in query("SELECT key, value FROM settings")})
     return values
+
+
+def category_values(key, fallback_sql):
+    configured = [value.strip() for value in school_settings().get(key, "").split(",") if value.strip()]
+    if configured:
+        return sorted(set(configured))
+    return [row["value"] for row in query(fallback_sql)]
 
 
 def extract_notes(file_storage):
@@ -239,6 +296,25 @@ def class_group(class_name):
     value = (class_name or "").strip()
     match = re.match(r"([A-Za-z]+\s*\d+)", value)
     return match.group(1).replace(" ", "").upper() if match else value
+
+
+def class_options():
+    configured = [value.strip() for value in school_settings().get("managed_classes", "").split(",") if value.strip()]
+    stored = [row["value"] for row in query("SELECT DISTINCT class_name AS value FROM users WHERE class_name != '' ORDER BY class_name")]
+    values = configured + stored
+    return sorted(set(values))
+
+
+def class_group_options():
+    return sorted(set(class_group(value) for value in class_options() if value))
+
+
+def class_arm_options():
+    return sorted(value for value in class_options() if re.search(r"[A-Za-z]\s*$", value))
+
+
+def class_matches(value, selected):
+    return not selected or value == selected or class_group(value) == class_group(selected)
 
 
 def generate_local_questions(subject, topic, notes, count, difficulty):
@@ -370,6 +446,10 @@ def ranking_tables():
         {**dict(row), "class_group": class_group(row["class_name"])}
         for row in rows
     ]
+    user = current_user()
+    if user and user["role"] == "teacher":
+        allowed = teacher_subjects(user)
+        rows = [row for row in rows if row["subject"] in allowed]
     if class_filter:
         rows = [row for row in rows if row["class_name"] == class_filter or row["class_group"] == class_filter]
     if subject_filter:
@@ -430,6 +510,46 @@ def login():
     return render_template("login.html")
 
 
+@app.route("/register/teacher", methods=["GET", "POST"])
+def register_teacher():
+    if request.method == "POST":
+        full_name = request.form["full_name"].strip()
+        class_name = request.form["class_name"].strip()
+        subjects = request.form["subjects"].strip()
+        if not full_name or not class_name or not subjects:
+            flash("Name, class, and at least one subject are required.", "error")
+        else:
+            username = "teacher." + secrets.token_hex(5)
+            user_id = execute(
+                "INSERT INTO users(username, full_name, password_hash, role, class_name, subjects, created_at) VALUES (?, ?, ?, 'teacher', ?, ?, ?)",
+                (username, full_name, hash_password(secrets.token_urlsafe(18)), class_name, subjects, datetime.now().isoformat(timespec="seconds")),
+            )
+            session["user_id"] = user_id
+            flash("Teacher registration completed.", "success")
+            return redirect(url_for("dashboard"))
+    return render_template("register_teacher.html", classes=class_group_options())
+
+
+@app.route("/register/student", methods=["GET", "POST"])
+def register_student():
+    classes = class_arm_options()
+    if request.method == "POST":
+        full_name = request.form["full_name"].strip()
+        class_name = request.form["class_name"].strip()
+        if not full_name or class_name not in classes:
+            flash("Enter your name and select a valid class.", "error")
+        else:
+            username = "student." + secrets.token_hex(5)
+            user_id = execute(
+                "INSERT INTO users(username, full_name, password_hash, role, class_name, created_at) VALUES (?, ?, ?, 'student', ?, ?)",
+                (username, full_name, hash_password(secrets.token_urlsafe(18)), class_name, datetime.now().isoformat(timespec="seconds")),
+            )
+            session["user_id"] = user_id
+            flash("Student registration completed.", "success")
+            return redirect(url_for("dashboard"))
+    return render_template("register_student.html", classes=classes)
+
+
 @app.get("/logout")
 def logout():
     session.clear()
@@ -459,10 +579,22 @@ def dashboard():
     if status_filter in ("published", "draft"):
         exam_sql += " AND e.published = ?"
         exam_params.append(int(status_filter == "published"))
+    if user["role"] == "student":
+        exam_sql += " AND (e.class_name = '' OR e.class_name = ? OR e.class_name = ?)"
+        exam_params.extend([user["class_name"], class_group(user["class_name"])])
+    elif user["role"] == "teacher":
+        subjects = teacher_subjects(user)
+        if subjects:
+            exam_sql += " AND e.subject IN (" + ",".join("?" for _ in subjects) + ")"
+            exam_params.extend(subjects)
+        else:
+            exam_sql += " AND e.created_by = ?"
+            exam_params.append(user["id"])
     exam_sql += " GROUP BY e.id ORDER BY e.id DESC"
     exams = query(exam_sql, exam_params)
     subjects = [row["subject"] for row in query("SELECT DISTINCT subject FROM exams ORDER BY subject")]
-    return render_template("dashboard.html", stats=stats, exams=exams, user=user, subjects=subjects, subject_filter=subject_filter, status_filter=status_filter, exam_type_filter=exam_type_filter, exam_types=EXAM_TYPES)
+    classes = class_options()
+    return render_template("dashboard.html", stats=stats, exams=exams, user=user, subjects=subjects, classes=classes, subject_filter=subject_filter, status_filter=status_filter, exam_type_filter=exam_type_filter, exam_types=EXAM_TYPES)
 
 
 @app.route("/questions", methods=["GET", "POST"])
@@ -471,6 +603,8 @@ def questions():
     if request.method == "POST":
         try:
             subject = request.form["subject"].strip()
+            if current_user()["role"] == "teacher" and subject not in teacher_subjects():
+                raise ValueError("You can only create questions for your assigned subjects.")
             topic = request.form["topic"].strip()
             notes = request.form.get("notes", "").strip()
             if request.files.get("notes_file") and request.files["notes_file"].filename:
@@ -495,22 +629,43 @@ def questions():
     if subject_filter:
         sql += " AND subject = ?"
         params.append(subject_filter)
-    if class_filter:
-        sql += " AND class_name = ?"
-        params.append(class_filter)
+    scope_sql, scope_params = scoped_question_sql(current_user())
+    sql += scope_sql
+    params.extend(scope_params)
     sql += " ORDER BY id DESC"
     return render_template(
-        "questions.html", questions=query(sql, params),
-        subjects=[row["subject"] for row in query("SELECT DISTINCT subject FROM questions ORDER BY subject")],
-        classes=[row["class_name"] for row in query("SELECT DISTINCT class_name FROM questions WHERE class_name != '' ORDER BY class_name")],
+        "questions.html", questions=[row for row in query(sql, params) if class_matches(row["class_name"], class_filter)],
+        subjects=teacher_subjects() if current_user()["role"] == "teacher" else category_values("managed_subjects", "SELECT DISTINCT subject AS value FROM questions ORDER BY subject"),
+        classes=class_group_options(),
         subject_filter=subject_filter, class_filter=class_filter,
+        teacher_subjects=teacher_subjects(),
     )
+
+
+@app.post("/questions/clear")
+@login_required("admin", "teacher")
+def clear_questions():
+    user = current_user()
+    if user["role"] == "admin":
+        execute("DELETE FROM questions")
+    else:
+        subjects = teacher_subjects(user)
+        if subjects:
+            placeholders = ",".join("?" for _ in subjects)
+            execute(f"DELETE FROM questions WHERE created_by = ? OR subject IN ({placeholders})", [user["id"], *subjects])
+        else:
+            execute("DELETE FROM questions WHERE created_by = ?", (user["id"],))
+    flash("Saved questions cleared.", "success")
+    return redirect(url_for("questions"))
 
 
 @app.route("/questions/manual", methods=["GET", "POST"])
 @login_required("admin", "teacher")
 def manual_question():
     if request.method == "POST":
+        if current_user()["role"] == "teacher" and request.form.get("subject", "").strip() not in teacher_subjects():
+            flash("You can only create questions for your assigned subjects.", "error")
+            return redirect(url_for("manual_question"))
         stems = request.form.getlist("stem[]") or [request.form.get("stem", "")]
         option_a = request.form.getlist("option_a[]") or [request.form.get("option_a", "")]
         option_b = request.form.getlist("option_b[]") or [request.form.get("option_b", "")]
@@ -551,7 +706,11 @@ def manual_question():
             return redirect(url_for("manual_question"))
         flash(f"Added {len(stems)} manual question{'s' if len(stems) != 1 else ''}.", "success")
         return redirect(url_for("questions"))
-    return render_template("question_manual.html")
+    return render_template(
+        "question_manual.html",
+        subjects=teacher_subjects() if current_user()["role"] == "teacher" else category_values("managed_subjects", "SELECT DISTINCT subject AS value FROM questions ORDER BY subject"),
+        classes=class_group_options(),
+    )
 
 
 @app.route("/questions/<int:question_id>/edit", methods=["GET", "POST"])
@@ -561,8 +720,8 @@ def edit_question(question_id):
     if not question:
         flash("Question not found.", "error")
         return redirect(url_for("questions"))
-    if current_user()["role"] == "teacher" and question["created_by"] != current_user()["id"]:
-        flash("Teachers can edit only questions they generated.", "error")
+    if current_user()["role"] == "teacher" and question["subject"] not in teacher_subjects():
+        flash("Teachers can edit only questions in their assigned subjects.", "error")
         return redirect(url_for("questions"))
     if request.method == "POST":
         try:
@@ -599,8 +758,8 @@ def edit_question(question_id):
 def delete_question(question_id):
     question = query("SELECT created_by FROM questions WHERE id = ?", (question_id,), one=True)
     user = current_user()
-    if not question or (user["role"] == "teacher" and question["created_by"] != user["id"]):
-        flash("Teachers can delete only questions they generated.", "error")
+    if not question or (user["role"] == "teacher" and query("SELECT subject FROM questions WHERE id=?", (question_id,), one=True)["subject"] not in teacher_subjects(user)):
+        flash("Teachers can delete only questions in their assigned subjects.", "error")
         return redirect(url_for("questions"))
     execute("DELETE FROM questions WHERE id = ?", (question_id,))
     flash("Question deleted.", "success")
@@ -643,22 +802,22 @@ def new_exam():
     if subject_filter:
         question_sql += " AND subject = ?"
         question_params.append(subject_filter)
-    if class_filter:
-        question_sql += " AND class_name = ?"
-        question_params.append(class_filter)
+    scope_sql, scope_params = scoped_question_sql(current_user())
+    question_sql += scope_sql
+    question_params.extend(scope_params)
     question_sql += " ORDER BY subject, topic, id"
-    available = query(question_sql, question_params)
+    available = [row for row in query(question_sql, question_params) if class_matches(row["class_name"], class_filter)]
     if request.method == "POST":
         selected = request.form.getlist("question_ids")
         if not request.form["title"].strip() or not selected:
             flash("Provide an exam title and select at least one question.", "error")
         else:
             exam_id = execute(
-                """INSERT INTO exams(title, subject, exam_type, instructions, duration_minutes, created_by, published, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO exams(title, subject, class_name, exam_type, instructions, duration_minutes, created_by, published, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     request.form["title"].strip(), request.form["subject"].strip(),
-                    request.form["exam_type"], request.form["instructions"], int(request.form["duration_minutes"]),
+                    request.form["class_name"].strip(), request.form["exam_type"], request.form["instructions"], int(request.form["duration_minutes"]),
                     current_user()["id"], int("published" in request.form),
                     datetime.now().isoformat(timespec="seconds"),
                 ),
@@ -669,8 +828,8 @@ def new_exam():
             return redirect(url_for("dashboard"))
     return render_template(
         "exam_new.html", questions=available, exam_types=EXAM_TYPES,
-        subjects=[row["subject"] for row in query("SELECT DISTINCT subject FROM questions ORDER BY subject")],
-        classes=[row["class_name"] for row in query("SELECT DISTINCT class_name FROM questions WHERE class_name != '' ORDER BY class_name")],
+        subjects=category_values("managed_subjects", "SELECT DISTINCT subject AS value FROM questions ORDER BY subject"),
+        classes=class_group_options(),
         subject_filter=subject_filter, class_filter=class_filter,
     )
 
@@ -686,15 +845,15 @@ def take_exam(exam_id):
         "SELECT id, started_at, submitted_at FROM attempts WHERE exam_id = ? AND student_id = ?",
         (exam_id, current_user()["id"]), one=True,
     )
-    permission = None
-    if existing and existing["submitted_at"]:
-        permission = query(
-            "SELECT id FROM rewrite_permissions WHERE attempt_id = ?",
-            (existing["id"],), one=True,
-        )
-        if not permission:
-            flash("You have already submitted this exam.", "error")
-            return redirect(url_for("dashboard"))
+    permission = query(
+        "SELECT id FROM rewrite_permissions WHERE attempt_id = ?",
+        (existing["id"],), one=True,
+    ) if existing else None
+    if existing and existing["submitted_at"] and not permission:
+        flash("You have already submitted this exam.", "error")
+        return redirect(url_for("dashboard"))
+    force_submitted = False
+    if existing and existing["submitted_at"] and permission:
         # Reuse the attempt row with a fresh timer. This avoids a unique-key
         # collision if the student opens the rewrite link more than once.
         now = datetime.now().isoformat(timespec="seconds")
@@ -719,8 +878,18 @@ def take_exam(exam_id):
                 (started.isoformat(timespec="seconds"), existing["id"]),
             )
         if (datetime.now() - started).total_seconds() > exam["duration_minutes"] * 60:
-            flash("This exam window has expired.", "error")
-            return redirect(url_for("dashboard"))
+            if permission:
+                now = datetime.now().isoformat(timespec="seconds")
+                execute("DELETE FROM responses WHERE attempt_id = ?", (existing["id"],))
+                execute("DELETE FROM rewrite_permissions WHERE id = ?", (permission["id"],))
+                execute("UPDATE attempts SET score=0, total=0, started_at=?, submitted_at='' WHERE id=?", (now, existing["id"]))
+                existing = query("SELECT id, started_at, submitted_at FROM attempts WHERE id=?", (existing["id"],), one=True)
+                permission = None
+            elif request.method == "POST":
+                force_submitted = True
+            else:
+                flash("This exam window has expired.", "error")
+                return redirect(url_for("dashboard"))
     questions = query("SELECT q.* FROM questions q JOIN exam_questions eq ON eq.question_id=q.id WHERE eq.exam_id=? ORDER BY eq.position", (exam_id,))
     if request.method == "POST":
         answers = {question["id"]: request.form.get(f"question_{question['id']}", "") for question in questions}
@@ -738,7 +907,7 @@ def take_exam(exam_id):
             attempt_id = execute("INSERT INTO attempts(exam_id, student_id, score, total, started_at, submitted_at) VALUES (?, ?, ?, ?, ?, ?)", (exam_id, current_user()["id"], score, len(questions), started_at, now))
         for question in questions:
             execute("INSERT INTO responses(attempt_id, question_id, answer, correct) VALUES (?, ?, ?, ?)", (attempt_id, question["id"], answers[question["id"]], int(answers[question["id"]] == question["correct_option"])))
-        return render_template("result.html", exam=exam, score=score, total=len(questions))
+        return render_template("result.html", exam=exam, force_submitted=force_submitted)
     if not existing:
         now = datetime.now().isoformat(timespec="seconds")
         execute(
@@ -784,6 +953,64 @@ def rankings():
     )
 
 
+@app.get("/reports/results.csv")
+@login_required("admin", "teacher")
+def results_csv():
+    class_filter = request.args.get("class_name", "").strip()
+    exam_type_filter = request.args.get("exam_type", "").strip()
+    rows = query(
+        """SELECT u.full_name, u.username, u.class_name, e.title, e.subject, e.exam_type,
+        a.score, a.total, a.submitted_at
+        FROM attempts a
+        JOIN users u ON u.id = a.student_id
+        JOIN exams e ON e.id = a.exam_id
+        WHERE u.role = 'student' AND a.submitted_at != ''
+        ORDER BY u.class_name, u.full_name, e.exam_type, e.title"""
+    )
+    records = [dict(row) for row in rows]
+    if current_user()["role"] == "teacher":
+        records = [row for row in records if row["subject"] in teacher_subjects()]
+    if class_filter:
+        records = [row for row in records if row["class_name"] == class_filter or class_group(row["class_name"]) == class_filter]
+        if any(row["class_name"] != class_filter for row in records):
+            for row in records:
+                row["class_name"] = class_filter
+    if exam_type_filter in EXAM_TYPES:
+        records = [row for row in records if row["exam_type"] == exam_type_filter]
+    frame = pd.DataFrame(records)
+    if frame.empty:
+        frame = pd.DataFrame(columns=["class_name", "full_name", "username", "overall_score", "overall_total", "overall_percentage"])
+    else:
+        summary = frame.groupby(["class_name", "full_name", "username"], as_index=False).agg(
+            overall_score=("score", "sum"), overall_total=("total", "sum")
+        )
+        summary["overall_percentage"] = (
+            summary["overall_score"] / summary["overall_total"] * 100
+        ).round(1)
+        for exam_type in sorted(frame["exam_type"].dropna().unique()):
+            type_frame = frame[frame["exam_type"] == exam_type]
+            type_summary = type_frame.groupby(
+                ["class_name", "full_name", "username"], as_index=False
+            ).agg(score=("score", "sum"), total=("total", "sum"))
+            key = re.sub(r"[^a-z0-9]+", "_", exam_type.lower()).strip("_")
+            type_summary[f"{key}_score"] = type_summary["score"]
+            type_summary[f"{key}_total"] = type_summary["total"]
+            type_summary[f"{key}_percentage"] = (
+                type_summary["score"] / type_summary["total"] * 100
+            ).round(1)
+            summary = summary.merge(
+                type_summary.drop(columns=["score", "total"]),
+                on=["class_name", "full_name", "username"], how="left",
+            )
+        frame = summary
+    output = io.StringIO()
+    frame.to_csv(output, index=False)
+    output.seek(0)
+    download = io.BytesIO(output.getvalue().encode("utf-8-sig"))
+    suffix = re.sub(r"[^a-z0-9]+", "-", class_filter.lower()).strip("-") or "all-classes"
+    return send_file(download, mimetype="text/csv", as_attachment=True, download_name=f"student-results-{suffix}.csv")
+
+
 @app.route("/admin", methods=["GET", "POST"])
 @login_required("admin")
 def admin():
@@ -820,7 +1047,7 @@ def admin():
             flash("School branding updated.", "success")
         elif action == "user":
             try:
-                execute("INSERT INTO users(username, full_name, password_hash, role, class_name, created_at) VALUES (?, ?, ?, ?, ?, ?)", (request.form["username"], request.form["full_name"], hash_password(request.form["password"]), request.form["role"], request.form.get("class_name", "").strip(), datetime.now().isoformat(timespec="seconds")))
+                execute("INSERT INTO users(username, full_name, password_hash, role, class_name, subjects, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", (request.form["username"], request.form["full_name"], hash_password(request.form["password"]), request.form["role"], request.form.get("class_name", "").strip(), request.form.get("subjects", "").strip(), datetime.now().isoformat(timespec="seconds")))
                 flash("User created.", "success")
             except sqlite3.IntegrityError:
                 flash("Username already exists.", "error")
@@ -864,9 +1091,9 @@ def admin():
                         full_name = str(row["full_name"]).strip()
                         username = str(row.get("username", "")).strip() or re.sub(r"[^a-z0-9]+", ".", full_name.lower()).strip(".")
                         execute(
-                            """INSERT INTO users(username, full_name, password_hash, role, class_name, created_at)
-                            VALUES (?, ?, ?, 'teacher', ?, ?)""",
-                            (username, full_name, hash_password(str(row["password"])), str(row.get("class_name", "")).strip(), datetime.now().isoformat(timespec="seconds")),
+                            """INSERT INTO users(username, full_name, password_hash, role, class_name, subjects, created_at)
+                            VALUES (?, ?, ?, 'teacher', ?, ?, ?)""",
+                            (username, full_name, hash_password(str(row["password"])), str(row.get("class_name", "")).strip(), str(row.get("subjects", "")).strip(), datetime.now().isoformat(timespec="seconds")),
                         )
                         created += 1
                     flash(f"Imported {created} teachers.", "success")
@@ -878,16 +1105,22 @@ def admin():
                 if duration < 1:
                     raise ValueError("Timer must be at least one minute.")
                 execute(
-                    "UPDATE exams SET duration_minutes = ?, exam_type = ? WHERE id = ?",
-                    (duration, request.form["exam_type"], int(request.form["exam_id"])),
+                    "UPDATE exams SET duration_minutes = ?, exam_type = ?, class_name = ? WHERE id = ?",
+                    (duration, request.form["exam_type"], request.form["class_name"].strip(), int(request.form["exam_id"])),
                 )
                 flash("Exam timer and type updated.", "success")
             except (ValueError, KeyError):
                 flash("Enter a valid exam timer and type.", "error")
+        elif action == "categories":
+            subjects = ",".join(sorted({value.strip() for value in request.form.get("subjects", "").split(",") if value.strip()}))
+            classes = ",".join(sorted({value.strip() for value in request.form.get("classes", "").split(",") if value.strip()}))
+            execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('managed_subjects', ?)", (subjects,))
+            execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('managed_classes', ?)", (classes,))
+            flash("Subject and class categories updated.", "success")
         return redirect(url_for("admin"))
     role_filter = request.args.get("role", "").strip()
     class_filter = request.args.get("class_name", "").strip()
-    user_sql = "SELECT id, username, full_name, role, class_name, active FROM users WHERE role != 'admin'"
+    user_sql = "SELECT id, username, full_name, role, class_name, subjects, active FROM users WHERE role != 'admin'"
     user_params = []
     if role_filter in ("teacher", "student"):
         user_sql += " AND role = ?"
@@ -900,16 +1133,18 @@ def admin():
         """SELECT a.id, a.score, a.total, a.submitted_at, u.full_name, u.class_name, e.title,
         EXISTS(SELECT 1 FROM rewrite_permissions rp WHERE rp.attempt_id=a.id) AS rewrite_granted
         FROM attempts a JOIN users u ON u.id=a.student_id JOIN exams e ON e.id=a.exam_id
-        WHERE a.submitted_at != ''
-        ORDER BY a.submitted_at DESC"""
+        ORDER BY CASE WHEN a.submitted_at = '' THEN 0 ELSE 1 END, a.submitted_at DESC"""
     )
     return render_template(
         "admin.html",
         users=query(user_sql, user_params),
         attempts=attempts,
         role_filter=role_filter, class_filter=class_filter,
-        classes=[row["class_name"] for row in query("SELECT DISTINCT class_name FROM users WHERE class_name != '' ORDER BY class_name")],
-        exams=query("SELECT id, title, subject, exam_type, duration_minutes, published FROM exams ORDER BY id DESC"),
+        classes=class_options(),
+        exam_classes=class_group_options(),
+        managed_subjects=category_values("managed_subjects", "SELECT DISTINCT subject AS value FROM questions ORDER BY subject"),
+        managed_classes=class_options(),
+        exams=query("SELECT id, title, subject, class_name, exam_type, duration_minutes, published FROM exams ORDER BY id DESC"),
         exam_types=EXAM_TYPES,
     )
 

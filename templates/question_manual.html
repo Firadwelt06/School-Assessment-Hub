@@ -3,9 +3,9 @@
 <div class="topbar"><div><div class="eyebrow">CONTENT STUDIO</div><h1>Add questions manually</h1><p class="muted">Add one question or use “Add another question” to create several questions in one submission. Formula support uses <code>\(...\)</code> or <code>\[...\]</code>.</p></div></div>
 <form method="post" enctype="multipart/form-data" class="panel">
   <div class="form-grid">
-    <label>Subject<input name="subject" required placeholder="Mathematics"></label>
+    <label>Subject{% if user.role == 'teacher' %}<select name="subject" required>{% for subject in subjects %}<option value="{{ subject }}">{{ subject }}</option>{% endfor %}</select>{% else %}<input name="subject" required placeholder="Mathematics">{% endif %}</label>
     <label>Topic<input name="topic" required placeholder="Quadratic equations"></label>
-    <label>Class<input name="class_name" placeholder="SS2 A" required></label>
+    <label>Class<select name="class_name" required>{% for class_name in classes %}<option value="{{ class_name }}">{{ class_name }}</option>{% endfor %}</select></label>
     <label>Difficulty<select name="difficulty"><option value="easy">Easy</option><option value="medium" selected>Medium</option><option value="hard">Hard</option></select></label>
     <label>Curriculum standard<input name="standard"></label>
     <label>Shared explanation (optional)<textarea name="explanation" rows="2"></textarea></label>

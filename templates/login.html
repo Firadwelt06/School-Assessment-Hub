@@ -11,6 +11,7 @@
       <button class="button primary wide">Sign in</button>
     </form>
     <p class="login-help">Demo: admin/admin123 · teacher/teacher123 · student/student123</p>
+    <p class="login-help"><a href="{{ url_for('register_teacher') }}">Teacher registration</a> · <a href="{{ url_for('register_student') }}">Student registration</a></p>
   </section>
 </div>
 {% endblock %}

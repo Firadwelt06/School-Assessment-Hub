@@ -63,6 +63,13 @@ bolu, Bolu Yusuf,StudentPass2,SS2 A
 
 `full_name`, `password`, and `class_name` are required. `username` is optional; if omitted, the system creates one from the student's name. Students are grouped by `class_name` for ranking reports.
 
+Ready-to-upload examples are included in:
+
+- `sample_data/students_sample.csv`
+- `sample_data/teachers_sample.csv`
+
+The sample accounts use intentionally simple test passwords and should only be used in a local test environment. Teacher imports require `full_name` and `password`; `username` and `class_name` are optional for teachers.
+
 ## Student rankings and exam timer
 
 Teachers and administrators can open **Student Rankings** to see subject rankings within each class and overall rankings within each class. The class filter also offers combined cohorts such as `SS1`, which combines `SS1 A`, `SS1 B`, and similar sections. Rankings can be narrowed by subject, exam type, and subject/overall view. Students see a countdown timer during every CBT exam. At five minutes and one minute remaining, the timer changes color and displays a warning. When it reaches zero, the exam is submitted automatically.
@@ -77,6 +84,16 @@ Administrators can choose Ocean, Forest, Royal, Sunset, or Slate from **Administ
 Administrators can publish or unpublish exams and change each exam's type and duration from the administration page. Teachers and administrators can select multiple question-bank items when creating an exam, filter the bank by subject or class, and add illustrations to manually created or edited questions. Supported question images are PNG, JPG/JPEG, WEBP, and GIF.
 
 The manual question editor also supports bulk entry: click **Add another question**, complete each question card, then click **Save all questions** to add them together.
+
+Teachers can be assigned subjects by an administrator or through the teacher registration page. Their question bank, exams, rankings, and CSV reports are limited to those subjects; administrators retain full visibility. Administrators can manage the subject and class categories from the Administration page. Students select a class during registration and only see published exams assigned to that class.
+
+Class categories use two levels: students are assigned to arm classes such as `SS1 A` and `SS1 B`, while teachers and exam/question filters use the general cohort `SS1`. Selecting `SS1` therefore includes both arms. Administrators manage the student arm list, and the application derives the general cohort automatically.
+
+Teacher and student registration is designed for supervised local-network sessions and does not ask for a password. For an internet-facing deployment, replace this with verified accounts or one-time access codes.
+
+## Result reports
+
+Students receive only a submission confirmation; scores are visible to teachers and administrators through the staff dashboard. Staff can download a CSV summary filtered by class and exam type. With all exam types selected, each row represents one student and includes separate score, total, and percentage columns for every completed exam type, plus overall totals. Therefore, a student who completes quizzes, midterms, and finals will appear in the same class report with all available exam-type results.
 
 Teachers and administrators can use **Add question manually**. Enter formulas in LaTeX:
 
