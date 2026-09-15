@@ -156,3 +156,4 @@ Carbon dioxide and water are raw materials...
 ```
 
 If the application reports `local (GEMINI_API_KEY is not set)`, the running Flask process cannot see the environment variable. Set it in the same PowerShell window before running `python app.py`. If it reports `local fallback (Gemini error: ...)`, the key was seen but the Gemini request or response failed; the message now includes the reason.
+
