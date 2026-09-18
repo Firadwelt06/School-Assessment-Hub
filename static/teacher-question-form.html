@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Teacher Question Form</title>
+  <style>
+    :root{font-family:Arial,sans-serif;color:#17324d;background:#eef5f8}
+    *{box-sizing:border-box}body{margin:0}.wrap{max-width:900px;margin:auto;padding:18px}
+    .card{background:#fff;border-radius:14px;padding:22px;margin:14px 0;box-shadow:0 2px 10px #17324d18}
+    h1{font-size:clamp(25px,5vw,40px);margin:0 0 8px}.lead{font-size:18px}.help{background:#e3f4f1;border-left:5px solid #16877d;padding:14px;font-size:17px}
+    label{display:grid;gap:7px;font-size:17px;font-weight:700;margin:15px 0}input,textarea,select{width:100%;font:inherit;padding:13px;border:2px solid #a8bfcc;border-radius:8px}
+    textarea{min-height:90px;resize:vertical}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    .question{border-top:4px solid #16877d;padding-top:8px}.number{color:#16877d;font-size:20px}
+    button{border:0;border-radius:8px;padding:14px 18px;font:inherit;font-weight:700;cursor:pointer;margin:5px 5px 5px 0}
+    .primary{background:#1769aa;color:#fff}.secondary{background:#dceaf2;color:#17324d}.danger{background:#fee2e2;color:#991b1b}
+    #status{font-weight:700;min-height:24px}.small{font-size:14px;color:#536b7d}
+    @media(max-width:650px){.grid{grid-template-columns:1fr}.wrap{padding:10px}}
+  </style>
+</head>
+<body>
+<main class="wrap">
+  <section class="card">
+    <h1>Teacher Question Form</h1>
+    <p class="lead">Write questions without internet. Your work is saved on this device.</p>
+    <div class="help">
+      <strong>Simple steps:</strong> 1. Fill the subject and class. 2. Write a question and four answers. 3. Choose the right answer. 4. Save the file.
+      <button class="secondary" type="button" id="read-help">🔊 Read these steps</button>
+    </div>
+    <div class="grid">
+      <label>Subject<input id="subject" placeholder="Example: Mathematics"></label>
+      <label>Topic<input id="topic" placeholder="Example: Fractions"></label>
+      <label>Class<input id="class_name" placeholder="Example: SS1 A"></label>
+      <label>Difficulty<select id="difficulty"><option value="easy">Easy</option><option value="medium" selected>Medium</option><option value="hard">Hard</option></select></label>
+    </div>
+  </section>
+  <section id="questions"></section>
+  <section class="card">
+    <button class="secondary" type="button" id="add">➕ Add another question</button>
+    <button class="primary" type="button" id="save">💾 Save questions to this device</button>
+    <button class="primary" type="button" id="download">⬇️ Download question file</button>
+    <button class="secondary" type="button" id="load">📂 Load saved questions</button>
+    <button class="danger" type="button" id="clear">🗑️ Clear this form</button>
+    <p id="status"></p>
+    <p class="small">When you reconnect to the school system, a teacher or administrator can import the downloaded JSON file from the Question Bank.</p>
+  </section>
+</main>
+<template id="question-template">
+  <article class="card question">
+    <div class="number">Question <span class="question-number"></span></div>
+    <label>Question text<textarea data-field="stem" placeholder="Write the question here"></textarea></label>
+    <div class="grid">
+      <label>Answer A<textarea data-field="option_a" placeholder="First answer"></textarea></label>
+      <label>Answer B<textarea data-field="option_b" placeholder="Second answer"></textarea></label>
+      <label>Answer C<textarea data-field="option_c" placeholder="Third answer"></textarea></label>
+      <label>Answer D<textarea data-field="option_d" placeholder="Fourth answer"></textarea></label>
+      <label>Which answer is correct?<select data-field="correct_option"><option>A</option><option>B</option><option>C</option><option>D</option></select></label>
+      <label>Explanation (optional)<textarea data-field="explanation" placeholder="Explain the answer"></textarea></label>
+    </div>
+  </article>
+</template>
+<script>
+(() => {
+  const list = document.getElementById("questions");
+  const template = document.getElementById("question-template");
+  const status = document.getElementById("status");
+  const fields = ["subject", "topic", "class_name", "difficulty"];
+  const say = (text) => window.speechSynthesis && speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+  const addQuestion = (data = {}) => {
+    const item = template.content.cloneNode(true);
+    item.querySelector(".question-number").textContent = list.children.length + 1;
+    Object.entries(data).forEach(([key, value]) => {
+      const field = item.querySelector(`[data-field="${key}"]`);
+      if (field) field.value = value || "";
+    });
+    list.appendChild(item);
+  };
+  const collect = () => ({
+    subject: document.getElementById("subject").value.trim(),
+    topic: document.getElementById("topic").value.trim(),
+    class_name: document.getElementById("class_name").value.trim(),
+    difficulty: document.getElementById("difficulty").value,
+    questions: [...list.querySelectorAll(".question")].map((card) => Object.fromEntries(
+      [...card.querySelectorAll("[data-field]")].map((field) => [field.dataset.field, field.value.trim()])
+    ))
+  });
+  const setStatus = (text) => { status.textContent = text; };
+  const apply = (data) => {
+    fields.forEach((key) => { if (data[key] !== undefined) document.getElementById(key).value = data[key]; });
+    list.replaceChildren();
+    (data.questions || []).forEach(addQuestion);
+    if (!list.children.length) addQuestion();
+  };
+  const download = () => {
+    const blob = new Blob([JSON.stringify(collect(), null, 2)], {type: "application/json"});
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = "teacher-questions.json";
+    link.click();
+    URL.revokeObjectURL(link.href);
+    setStatus("Question file downloaded.");
+  };
+  document.getElementById("add").onclick = () => addQuestion();
+  document.getElementById("save").onclick = () => { localStorage.setItem("teacher-questions", JSON.stringify(collect())); setStatus("Saved on this device."); };
+  document.getElementById("download").onclick = download;
+  document.getElementById("load").onclick = () => {
+    const saved = localStorage.getItem("teacher-questions");
+    if (saved) { apply(JSON.parse(saved)); setStatus("Saved questions loaded."); } else setStatus("There are no saved questions on this device.");
+  };
+  document.getElementById("clear").onclick = () => { if (confirm("Clear all questions?")) { apply({}); setStatus("Form cleared."); } };
+  document.getElementById("read-help").onclick = () => say("Fill the subject and class. Write a question and four answers. Choose the right answer. Then save the file.");
+  addQuestion();
+})();
+</script>
+</body>
+</html>

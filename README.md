@@ -47,7 +47,13 @@ WAITRESS_THREADS=8
 
 Restart `python app.py` after changing `.env`; environment variables are read when the process starts. In normal mode, `python app.py` now starts the Waitress production WSGI server. Set `FLASK_DEBUG=1` only for development.
 
-Open `http://localhost:5000`. The Flask server binds to `0.0.0.0`, so other staff and students on the same Wi-Fi/LAN can use the host computer's LAN IP, for example `http://192.168.1.20:5000`. Allow Python/port 5000 through Windows Firewall when prompted. Everyone must be connected to the same private network; guest Wi-Fi isolation can prevent devices from seeing the host.
+Open `http://localhost:5000`. The Flask server binds to `0.0.0.0`, so other staff and students on the same Wi-Fi/LAN can use `http://lahs.local:5000` after the name is configured. The app advertises the name with Zeroconf, but `.local` discovery depends on mDNS support on each client and is not reliable on every Windows installation. For deterministic Windows access, run PowerShell as Administrator on each client:
+
+```powershell
+Start-Process PowerShell -Verb RunAs -ArgumentList '-ExecutionPolicy Bypass -File ".\setup-school-hostname.ps1" -ServerIp 192.168.1.4 -Hostname lahs.local -Wait'
+```
+
+Replace `192.168.1.4` with the server's current IPv4 address. The command opens an elevated PowerShell window because Windows protects the hosts file. Allow Python/port 5000 through Windows Firewall when prompted. This hosts-file method must be run on every Windows client; it does not configure Android or other devices. Everyone must be connected to the same private network; guest Wi-Fi isolation can prevent devices from seeing the host. Change `APP_HOSTNAME` in `.env` to the name the school wants to use. If the router supports local DNS/host records, adding the same hostname there is preferable because it works for all devices and continues to work after the server receives a new IP.
 
 ## First-time MySQL setup on Windows
 
@@ -78,6 +84,10 @@ python app.py
 The migration replaces the records in the configured MySQL tables with the records from the SQLite file. Keep the original `assessment.db` as a backup until you have checked users, questions, exams, attempts, reports, and settings.
 
 For other computers on the LAN, open `http://SERVER-IP:5000`. Find the server address with `ipconfig`. The Windows Firewall must allow inbound TCP port 5000.
+
+## Offline teacher question form
+
+From **Question Bank**, select **Download offline form**. The downloaded `teacher-question-form.html` works without a network connection and saves questions in the browser's local storage. It uses large controls, plain-language instructions, a read-aloud button, and a JSON download. When the teacher is back on the school network, sign in, open **Question Bank**, choose the JSON file under **Import offline questions**, and the questions will be added to the teacher's bank. This is intentionally a multiple-choice template and does not transfer images; images can be added later in the online editor.
 
 Demo accounts:
 

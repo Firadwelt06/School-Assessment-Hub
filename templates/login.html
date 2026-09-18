@@ -12,6 +12,7 @@
     </form>
     <p class="login-help">Demo: admin/admin123 · teacher/teacher123 · student/student123</p>
     <p class="login-help"><a href="{{ url_for('register_teacher') }}">Teacher registration</a> · <a href="{{ url_for('register_student') }}">Student registration</a></p>
+    <p class="login-help">On the school network: <strong>http://{{ app_hostname }}:{{ app_port }}</strong></p>
   </section>
 </div>
 {% endblock %}

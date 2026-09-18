@@ -4,6 +4,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import sqlite3
 import unicodedata
 from datetime import datetime, timedelta
@@ -52,8 +53,24 @@ ALLOWED_IMAGES = {"png", "jpg", "jpeg", "webp", "gif"}
 EXAM_TYPES = ("midterm", "final", "quiz", "practice", "mock", "assignment", "other")
 DATA_CLEAR_PASSWORD = os.getenv("DATA_CLEAR_PASSWORD", "change-this-clear-password")
 THEMES = {"ocean", "forest", "royal", "sunset", "slate"}
+APP_PORT = int(os.getenv("PORT", "5000"))
+APP_HOSTNAME = os.getenv("APP_HOSTNAME", "school-assessment.local").strip()
+ZEROCONF_ENABLED = os.getenv("ZEROCONF_ENABLED", "1").lower() in {"1", "true", "yes"}
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "change-this-development-secret")
+
+
+def get_advertised_ip():
+    """Return the address used to reach this computer from the active LAN."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("8.8.8.8", 80))
+            address = probe.getsockname()[0]
+            if not address.startswith("127."):
+                return address
+    except OSError:
+        pass
+    return socket.gethostbyname(socket.gethostname())
 
 
 def db():
@@ -644,7 +661,13 @@ def ranking_tables():
 @app.context_processor
 def inject_globals():
     settings = school_settings()
-    return {"user": current_user(), "school": settings, "themes": sorted(THEMES)}
+    return {
+        "user": current_user(),
+        "school": settings,
+        "themes": sorted(THEMES),
+        "app_hostname": APP_HOSTNAME,
+        "app_port": APP_PORT,
+    }
 
 
 @app.route("/")
@@ -819,6 +842,74 @@ def clear_questions():
         else:
             execute("DELETE FROM questions WHERE created_by = ?", (user["id"],))
     flash("Saved questions cleared.", "success")
+    return redirect(url_for("questions"))
+
+
+@app.get("/questions/offline-template")
+def offline_question_template():
+    return send_file(
+        BASE_DIR / "static" / "teacher-question-form.html",
+        as_attachment=True,
+        download_name="teacher-question-form.html",
+        mimetype="text/html",
+    )
+
+
+@app.post("/questions/import-offline")
+@login_required("admin", "teacher")
+def import_offline_questions():
+    upload = request.files.get("question_file")
+    if not upload or not upload.filename:
+        flash("Choose an exported question file first.", "error")
+        return redirect(url_for("questions"))
+    try:
+        payload = json.load(upload.stream)
+        questions = payload.get("questions") if isinstance(payload, dict) else payload
+        if not isinstance(questions, list) or not questions:
+            raise ValueError("The question file does not contain any questions.")
+        user = current_user()
+        imported = 0
+        for item in questions:
+            if not isinstance(item, dict):
+                raise ValueError("Every saved question must be an object.")
+            subject = str(item.get("subject", "")).strip()
+            if user["role"] == "teacher" and subject not in teacher_subjects(user):
+                raise ValueError(f"You cannot import questions for {subject or 'an unassigned subject'}.")
+            values = (
+                subject,
+                str(item.get("topic", "")).strip(),
+                str(item.get("class_name", "")).strip(),
+                "",
+                str(item.get("stem", "")).strip(),
+                str(item.get("option_a", "")).strip(),
+                str(item.get("option_b", "")).strip(),
+                str(item.get("option_c", "")).strip(),
+                str(item.get("option_d", "")).strip(),
+                str(item.get("correct_option", "")).strip().upper(),
+                str(item.get("difficulty", "medium")).strip().lower(),
+                str(item.get("explanation", "")).strip(),
+                str(item.get("standard", "")).strip(),
+                user["id"],
+                datetime.now().isoformat(timespec="seconds"),
+            )
+            if not all(values[index] for index in (0, 1, 4, 5, 6, 7, 8)):
+                raise ValueError("Each question needs a subject, topic, question, and four answer choices.")
+            if values[9] not in {"A", "B", "C", "D"}:
+                raise ValueError("Each question must have a correct answer of A, B, C, or D.")
+            if values[10] not in {"easy", "medium", "hard"}:
+                raise ValueError("Difficulty must be Easy, Medium, or Hard.")
+            execute(
+                """INSERT INTO questions
+                (subject, topic, class_name, image_path, stem, option_a, option_b, option_c, option_d,
+                 correct_option, difficulty, explanation, standard, created_by, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                values,
+            )
+            imported += 1
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        flash(f"Could not import questions: {error}", "error")
+    else:
+        flash(f"Imported {imported} offline question{'s' if imported != 1 else ''}.", "success")
     return redirect(url_for("questions"))
 
 
@@ -1515,9 +1606,45 @@ init_db()
 
 if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "5000"))
+    port = APP_PORT
     if os.getenv("FLASK_DEBUG") == "1":
         app.run(host=host, port=port, debug=True)
     else:
         from waitress import serve
-        serve(app, host=host, port=port, threads=int(os.getenv("WAITRESS_THREADS", "8")))
+        zeroconf = None
+        service_info = None
+        if ZEROCONF_ENABLED:
+            try:
+                from zeroconf import ServiceInfo, Zeroconf
+
+                lan_ip = get_advertised_ip()
+                advertised_hostname = APP_HOSTNAME.rstrip(".")
+                if not advertised_hostname.endswith(".local"):
+                    advertised_hostname = f"{advertised_hostname}.local"
+                zeroconf = Zeroconf()
+                service_info = ServiceInfo(
+                    "_http._tcp.local.",
+                    "School Assessment._http._tcp.local.",
+                    addresses=[socket.inet_aton(lan_ip)],
+                    port=port,
+                    server=f"{advertised_hostname}.",
+                    properties={"path": "/"},
+                )
+                zeroconf.register_service(service_info)
+                print(f"LAN name: http://{APP_HOSTNAME}:{port}")
+            except (ImportError, OSError, ValueError) as error:
+                print(
+                    f"LAN name discovery is unavailable: {error}. "
+                    f"Use http://{APP_HOSTNAME}:{port} only after configuring DNS or the client hosts file."
+                )
+        else:
+            print(
+                f"LAN name discovery is disabled. Configure DNS or the client hosts file for "
+                f"http://{APP_HOSTNAME}:{port}."
+            )
+        try:
+            serve(app, host=host, port=port, threads=int(os.getenv("WAITRESS_THREADS", "8")))
+        finally:
+            if zeroconf and service_info:
+                zeroconf.unregister_service(service_info)
+                zeroconf.close()
