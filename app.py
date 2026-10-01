@@ -730,16 +730,22 @@ def register_teacher():
         class_name = request.form["class_name"].strip()
         subjects = request.form["subjects"].strip()
         access_code = request.form["access_code"].strip()
-        if not full_name or not class_name or not subjects or not valid_access_code(access_code, "teacher"):
+        teacher_password_hash = school_settings().get("teacher_default_password_hash", "")
+        if not teacher_password_hash:
+            flash("Teacher registration is not configured yet. Ask the administrator for the teacher password.", "error")
+        elif not full_name or not class_name or not subjects or not valid_access_code(access_code, "teacher"):
             flash("Name, class, subjects, and a valid, unexpired teacher access code are required.", "error")
         else:
             username = "teacher." + secrets.token_hex(5)
             user_id = execute(
                 "INSERT INTO users(username, full_name, password_hash, role, class_name, subjects, created_at) VALUES (?, ?, ?, 'teacher', ?, ?, ?)",
-                (username, full_name, hash_password(secrets.token_urlsafe(18)), class_name, subjects, datetime.now().isoformat(timespec="seconds")),
+                (username, full_name, teacher_password_hash, class_name, subjects, datetime.now().isoformat(timespec="seconds")),
             )
             session["user_id"] = user_id
-            flash("Teacher registration completed.", "success")
+            flash(
+                f"Teacher registration completed. Your sign-in username is {username}; use the shared teacher password supplied by your administrator.",
+                "success",
+            )
             return redirect(url_for("dashboard"))
     return render_template("register_teacher.html", classes=class_group_options())
 
@@ -1551,6 +1557,19 @@ def admin():
             upsert_setting("managed_subjects", subjects)
             upsert_setting("managed_classes", classes)
             flash("Subject and class categories updated.", "success")
+        elif action == "teacher_default_password":
+            password = request.form.get("teacher_default_password", "")
+            if len(password) < 8 or len(password) > 128:
+                flash("The shared teacher password must be between 8 and 128 characters.", "error")
+            else:
+                password_hash = hash_password(password)
+                upsert_setting("teacher_default_password_hash", password_hash)
+                execute("UPDATE users SET password_hash = ? WHERE role = 'teacher'", (password_hash,))
+                teacher_count = query("SELECT COUNT(*) AS count FROM users WHERE role = 'teacher'", one=True)["count"]
+                flash(
+                    f"Shared teacher password updated for {teacher_count} existing teacher account(s) and future registrations. Share it with teachers securely.",
+                    "success",
+                )
         elif action == "access_code":
             role = request.form.get("access_role", "").strip()
             try:

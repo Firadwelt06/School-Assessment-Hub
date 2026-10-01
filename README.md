@@ -114,6 +114,8 @@ bolu, Bolu Yusuf,StudentPass2,SS2 A
 
 Administrators can generate separate access codes for teacher and student registration. Codes are role-specific, do not depend on subject, and stop working once their configured duration expires. Existing shared access codes are migrated as student codes; generate new teacher codes for teacher registration.
 
+Administrators can configure a shared password for teacher accounts from **Administration**. Setting or changing it resets the password for all existing teachers and applies it to future teacher registrations; student passwords are unaffected. New teachers are shown their sign-in username after registration. Because teachers share this password, distribute it securely and change it promptly if it is exposed.
+
 Ready-to-upload examples are included in:
 
 - `sample_data/students_sample.csv`
