@@ -111,6 +111,8 @@ bolu, Bolu Yusuf,StudentPass2,SS2 A
 
 `full_name`, `password`, and `class_name` are required. `username` is optional; if omitted, the system creates one from the student's name. Students are grouped by `class_name` for ranking reports.
 
+Administrators can generate separate access codes for teacher and student registration. Codes are role-specific, do not depend on subject, and stop working once their configured duration expires. Existing shared access codes are migrated as student codes; generate new teacher codes for teacher registration.
+
 Ready-to-upload examples are included in:
 
 - `sample_data/students_sample.csv`

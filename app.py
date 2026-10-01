@@ -194,7 +194,8 @@ def init_mysql_db():
             `key` VARCHAR(255) PRIMARY KEY, `value` TEXT NOT NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
         """CREATE TABLE IF NOT EXISTS subject_access_codes (
-            id INT PRIMARY KEY AUTO_INCREMENT, subject VARCHAR(255) NOT NULL, code VARCHAR(100) NOT NULL,
+            id INT PRIMARY KEY AUTO_INCREMENT, subject VARCHAR(255) NOT NULL,
+            role ENUM('teacher', 'student') NOT NULL DEFAULT 'student', code VARCHAR(100) NOT NULL,
             expires_at VARCHAR(40) NOT NULL, active TINYINT NOT NULL DEFAULT 1,
             created_by INT NOT NULL, created_at VARCHAR(40) NOT NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
@@ -203,6 +204,12 @@ def init_mysql_db():
         with connection.cursor() as cursor:
             for statement in statements:
                 cursor.execute(statement)
+            cursor.execute("SHOW COLUMNS FROM subject_access_codes LIKE 'role'")
+            if not cursor.fetchone():
+                cursor.execute(
+                    "ALTER TABLE subject_access_codes ADD COLUMN role "
+                    "ENUM('teacher', 'student') NOT NULL DEFAULT 'student' AFTER subject"
+                )
             cursor.execute("SELECT COUNT(*) AS count FROM users")
             if cursor.fetchone()["count"] == 0:
                 now = datetime.now().isoformat(timespec="seconds")
@@ -273,11 +280,20 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS subject_access_codes (
             id INTEGER PRIMARY KEY AUTOINCREMENT, subject TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'student' CHECK(role IN ('teacher', 'student')),
             code TEXT NOT NULL, expires_at TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
             created_by INTEGER NOT NULL, created_at TEXT NOT NULL
         );
         """
     )
+    access_code_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(subject_access_codes)").fetchall()
+    }
+    if "role" not in access_code_columns:
+        connection.execute(
+            "ALTER TABLE subject_access_codes ADD COLUMN role TEXT NOT NULL DEFAULT 'student' "
+            "CHECK(role IN ('teacher', 'student'))"
+        )
     columns = {row["name"] for row in connection.execute("PRAGMA table_info(questions)").fetchall()}
     if "subject" not in columns:
         connection.execute("ALTER TABLE questions ADD COLUMN subject TEXT NOT NULL DEFAULT 'General'")
@@ -468,17 +484,21 @@ def normalized_name(value):
     return " ".join(unicodedata.normalize("NFKC", value or "").casefold().split())
 
 
-def valid_access_code(subject, code):
+def valid_access_code(code, role):
     record = query(
-        "SELECT * FROM subject_access_codes WHERE subject = ? AND code = ? AND active = 1 ORDER BY id DESC",
-        (subject.strip(), code.strip().upper()), one=True,
+        "SELECT * FROM subject_access_codes WHERE code = ? AND role = ? AND active = 1 ORDER BY id DESC",
+        (code.strip().upper(), role), one=True,
     )
     if not record:
         return False
+    return not access_code_is_expired(record["expires_at"])
+
+
+def access_code_is_expired(expires_at):
     try:
-        return datetime.now() <= datetime.fromisoformat(record["expires_at"])
+        return datetime.now() > datetime.fromisoformat(expires_at)
     except ValueError:
-        return False
+        return True
 
 
 def find_student_by_name(full_name):
@@ -700,10 +720,9 @@ def register_teacher():
         full_name = request.form["full_name"].strip()
         class_name = request.form["class_name"].strip()
         subjects = request.form["subjects"].strip()
-        access_subject = request.form["access_subject"].strip()
         access_code = request.form["access_code"].strip()
-        if not full_name or not class_name or not subjects or not valid_access_code(access_subject, access_code):
-            flash("Name, class, subjects, and a valid active subject access code are required.", "error")
+        if not full_name or not class_name or not subjects or not valid_access_code(access_code, "teacher"):
+            flash("Name, class, subjects, and a valid, unexpired teacher access code are required.", "error")
         else:
             username = "teacher." + secrets.token_hex(5)
             user_id = execute(
@@ -713,20 +732,18 @@ def register_teacher():
             session["user_id"] = user_id
             flash("Teacher registration completed.", "success")
             return redirect(url_for("dashboard"))
-    return render_template("register_teacher.html", classes=class_group_options(), subjects=category_values("managed_subjects", "SELECT DISTINCT subject AS value FROM questions ORDER BY subject"))
+    return render_template("register_teacher.html", classes=class_group_options())
 
 
 @app.route("/register/student", methods=["GET", "POST"])
 def register_student():
     classes = class_arm_options()
-    subjects = category_values("managed_subjects", "SELECT DISTINCT subject AS value FROM questions ORDER BY subject")
     if request.method == "POST":
         full_name = request.form["full_name"].strip()
         class_name = request.form["class_name"].strip()
-        access_subject = request.form["access_subject"].strip()
         access_code = request.form["access_code"].strip()
-        if not full_name or class_name not in classes or not valid_access_code(access_subject, access_code):
-            flash("Enter your name, valid class, and active subject access code.", "error")
+        if not full_name or class_name not in classes or not valid_access_code(access_code, "student"):
+            flash("Enter your name, valid class, and a valid, unexpired student access code.", "error")
         else:
             existing = find_student_by_name(full_name)
             if existing:
@@ -741,7 +758,7 @@ def register_student():
             session["user_id"] = user_id
             flash("Student record updated. Continue to your examinations.", "success")
             return redirect(url_for("dashboard"))
-    return render_template("register_student.html", classes=classes, subjects=subjects)
+    return render_template("register_student.html", classes=classes)
 
 
 @app.get("/logout")
@@ -1500,20 +1517,20 @@ def admin():
             upsert_setting("managed_classes", classes)
             flash("Subject and class categories updated.", "success")
         elif action == "access_code":
-            subject = request.form.get("access_subject", "").strip()
+            role = request.form.get("access_role", "").strip()
             try:
                 duration_hours = float(request.form.get("duration_hours", "24"))
-                if not subject or duration_hours <= 0 or duration_hours > 720:
+                if role not in {"teacher", "student"} or duration_hours < 0.5 or duration_hours > 720:
                     raise ValueError
                 code = secrets.token_urlsafe(8).replace("-", "").replace("_", "").upper()[:10]
                 expires_at = datetime.now() + timedelta(hours=duration_hours)
                 execute(
-                    "INSERT INTO subject_access_codes(subject, code, expires_at, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
-                    (subject, code, expires_at.isoformat(timespec="seconds"), current_user()["id"], datetime.now().isoformat(timespec="seconds")),
+                    "INSERT INTO subject_access_codes(subject, role, code, expires_at, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    ("", role, code, expires_at.isoformat(timespec="seconds"), current_user()["id"], datetime.now().isoformat(timespec="seconds")),
                 )
-                flash(f"Access code for {subject}: {code} (expires {expires_at.strftime('%Y-%m-%d %H:%M')}).", "success")
+                flash(f"{role.capitalize()} access code: {code} (expires {expires_at.strftime('%Y-%m-%d %H:%M')}).", "success")
             except ValueError:
-                flash("Enter a subject and a duration between 0 and 720 hours.", "error")
+                flash("Choose a role and enter a duration between 0.5 and 720 hours.", "error")
         elif action == "clear_data":
             if not secrets.compare_digest(request.form.get("clear_password", ""), DATA_CLEAR_PASSWORD):
                 flash("The special data-clear password is incorrect.", "error")
@@ -1580,7 +1597,10 @@ def admin():
         exam_classes=class_group_options(),
         managed_subjects=category_values("managed_subjects", "SELECT DISTINCT subject AS value FROM questions ORDER BY subject"),
         managed_classes=class_options(),
-        access_codes=query("SELECT * FROM subject_access_codes ORDER BY id DESC"),
+        access_codes=[
+            {**dict(row), "expired": access_code_is_expired(row["expires_at"])}
+            for row in query("SELECT * FROM subject_access_codes ORDER BY id DESC")
+        ],
         exams=query("SELECT id, title, subject, class_name, exam_type, duration_minutes, published FROM exams ORDER BY id DESC"),
         exam_types=EXAM_TYPES,
     )
@@ -1589,24 +1609,24 @@ def admin():
 @app.post("/admin/access-codes/<int:code_id>/toggle")
 @login_required("admin")
 def toggle_access_code(code_id):
-    record = query("SELECT active, subject FROM subject_access_codes WHERE id = ?", (code_id,), one=True)
+    record = query("SELECT active, role FROM subject_access_codes WHERE id = ?", (code_id,), one=True)
     if not record:
         flash("Access code not found.", "error")
     else:
         execute("UPDATE subject_access_codes SET active = ? WHERE id = ?", (int(not record["active"]), code_id))
-        flash(f"{record['subject']} access code {'enabled' if not record['active'] else 'disabled'}.", "success")
+        flash(f"{record['role'].capitalize()} access code {'enabled' if not record['active'] else 'disabled'}.", "success")
     return redirect(url_for("admin"))
 
 
 @app.post("/admin/access-codes/<int:code_id>/delete")
 @login_required("admin")
 def delete_access_code(code_id):
-    record = query("SELECT subject FROM subject_access_codes WHERE id = ?", (code_id,), one=True)
+    record = query("SELECT role FROM subject_access_codes WHERE id = ?", (code_id,), one=True)
     if not record:
         flash("Access code not found.", "error")
     else:
         execute("DELETE FROM subject_access_codes WHERE id = ?", (code_id,))
-        flash(f"{record['subject']} access code was permanently deleted.", "success")
+        flash(f"{record['role'].capitalize()} access code was permanently deleted.", "success")
     return redirect(url_for("admin"))
 
 
