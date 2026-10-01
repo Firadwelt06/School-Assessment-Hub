@@ -485,6 +485,17 @@ def normalized_name(value):
     return " ".join(unicodedata.normalize("NFKC", value or "").casefold().split())
 
 
+def teacher_username(full_name):
+    ascii_name = unicodedata.normalize("NFKD", full_name).encode("ascii", "ignore").decode("ascii").lower()
+    base = re.sub(r"[^a-z0-9]+", ".", ascii_name).strip(".") or "teacher"
+    candidate = base
+    suffix = 2
+    while query("SELECT 1 FROM users WHERE username = ?", (candidate,), one=True):
+        candidate = f"{base}{suffix}"
+        suffix += 1
+    return candidate
+
+
 def valid_access_code(code, role):
     record = query(
         "SELECT * FROM subject_access_codes WHERE code = ? AND role = ? AND active = 1 ORDER BY id DESC",
@@ -736,16 +747,13 @@ def register_teacher():
         elif not full_name or not class_name or not subjects or not valid_access_code(access_code, "teacher"):
             flash("Name, class, subjects, and a valid, unexpired teacher access code are required.", "error")
         else:
-            username = "teacher." + secrets.token_hex(5)
+            username = teacher_username(full_name)
             user_id = execute(
                 "INSERT INTO users(username, full_name, password_hash, role, class_name, subjects, created_at) VALUES (?, ?, ?, 'teacher', ?, ?, ?)",
                 (username, full_name, teacher_password_hash, class_name, subjects, datetime.now().isoformat(timespec="seconds")),
             )
             session["user_id"] = user_id
-            flash(
-                f"Teacher registration completed. Your sign-in username is {username}; use the shared teacher password supplied by your administrator.",
-                "success",
-            )
+            flash("Teacher registration completed. Your sign-in username is shown on your dashboard.", "success")
             return redirect(url_for("dashboard"))
     return render_template("register_teacher.html", classes=class_group_options())
 
