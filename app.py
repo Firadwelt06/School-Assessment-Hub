@@ -18,8 +18,10 @@ from dotenv import load_dotenv
 
 try:
     from google import genai
+    from google.genai import types as genai_types
 except ImportError:
     genai = None
+    genai_types = None
 
 try:
     from docx import Document
@@ -565,7 +567,13 @@ meaningfully different, use plausible distractors, and clear age-appropriate wor
         model_name = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
         with genai.Client(api_key=api_key) as client:
             response = client.models.generate_content(
-                model=model_name, contents=prompt
+                model=model_name,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(
+                        disable=True
+                    )
+                ),
             )
         text = response.text.strip().replace("```json", "").replace("```", "").strip()
         generated = json.loads(text)
@@ -1106,14 +1114,18 @@ def new_exam():
     available = [row for row in query(question_sql, question_params) if class_matches(row["class_name"], class_filter)]
     if request.method == "POST":
         selected = request.form.getlist("question_ids")
-        if not request.form["title"].strip() or not selected:
-            flash("Provide an exam title and select at least one question.", "error")
+        title = request.form.get("title", "").strip()
+        subject = request.form.get("subject", "").strip()
+        if not title or not subject or not selected:
+            flash("Provide an exam title and subject, and select at least one question.", "error")
+        elif current_user()["role"] == "teacher" and subject not in teacher_subjects():
+            flash("You can only create exams for your assigned subjects.", "error")
         else:
             exam_id = execute(
                 """INSERT INTO exams(title, subject, class_name, exam_type, instructions, duration_minutes, created_by, published, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    request.form["title"].strip(), request.form["subject"].strip(),
+                    title, subject,
                     request.form["class_name"].strip(), request.form["exam_type"], request.form["instructions"], int(request.form["duration_minutes"]),
                     current_user()["id"], int("published" in request.form),
                     datetime.now().isoformat(timespec="seconds"),
@@ -1126,6 +1138,7 @@ def new_exam():
     return render_template(
         "exam_new.html", questions=available, exam_types=EXAM_TYPES,
         subjects=category_values("managed_subjects", "SELECT DISTINCT subject AS value FROM questions ORDER BY subject"),
+        teacher_subjects=teacher_subjects(),
         classes=class_group_options(),
         subject_filter=subject_filter, class_filter=class_filter,
     )
