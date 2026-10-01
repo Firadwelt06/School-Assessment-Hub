@@ -7,6 +7,7 @@ A professional Flask-based local-network CBT platform for schools.
 - Role-based sign-in for administrators, teachers, and students.
 - Subject-specific question generation from pasted notes or uploaded PDF/DOCX lesson documents.
 - Gemini API integration with a local fallback when no API key is configured.
+- Temporary Gemini service errors are retried before using local fallback; fallback-generated questions should be reviewed before use.
 - Teacher question bank and exam builder.
 - Branded CBT paper header using the administrator's school name, address, and logo.
 - Student browser-based CBT examination experience.
@@ -139,6 +140,8 @@ The manual question editor also supports bulk entry: click **Add another questio
 
 Teachers can be assigned subjects by an administrator or through the teacher registration page. Their question bank, exams, rankings, and CSV reports are limited to those subjects; administrators retain full visibility. Administrators can manage the subject and class categories from the Administration page. Students select a class during registration and only see published exams assigned to that class.
 
+Clearing the question bank removes only questions that are not already attached to an exam. Questions used by exams are retained so clearing unused content cannot disrupt other teachers or existing exams.
+
 Class categories use two levels: students are assigned to arm classes such as `SS1 A` and `SS1 B`, while teachers and exam/question filters use the general cohort `SS1`. Selecting `SS1` therefore includes both arms. Administrators manage the student arm list, and the application derives the general cohort automatically.
 
 Teacher and student registration is designed for supervised local-network sessions and does not ask for a password. For an internet-facing deployment, replace this with verified accounts or one-time access codes.
@@ -205,4 +208,4 @@ Chlorophyll absorbs light energy in the chloroplast...
 Carbon dioxide and water are raw materials...
 ```
 
-If the application reports `local (GEMINI_API_KEY is not set)`, the running Flask process cannot see the environment variable. Set it in the same PowerShell window before running `python app.py`. If it reports `local fallback (Gemini error: ...)`, the key was seen but the Gemini request or response failed; the message now includes the reason.
+If the application reports `local (GEMINI_API_KEY is not set)`, the running Flask process cannot see the environment variable. Set it in the same PowerShell window before running `python app.py`. Temporary Gemini service errors are retried before fallback; if it reports `local fallback after ... Gemini attempt(s)`, review the generated questions before including them in an exam.

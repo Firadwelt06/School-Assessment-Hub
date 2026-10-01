@@ -6,6 +6,7 @@ import re
 import secrets
 import socket
 import sqlite3
+import time
 import unicodedata
 from datetime import datetime, timedelta
 from functools import wraps
@@ -583,18 +584,26 @@ Return only valid JSON array items with subject, topic, stem, option_a, option_b
 option_c, option_d, correct_option (A/B/C/D), explanation, and standard.
 Use different concepts from the notes for different questions. Make every stem
 meaningfully different, use plausible distractors, and clear age-appropriate wording."""
+    attempts = 0
     try:
         model_name = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
         with genai.Client(api_key=api_key) as client:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=genai_types.GenerateContentConfig(
-                    automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(
-                        disable=True
-                    )
-                ),
+            config = genai_types.GenerateContentConfig(
+                automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(
+                    disable=True
+                )
             )
+            for retry in range(3):
+                attempts += 1
+                try:
+                    response = client.models.generate_content(
+                        model=model_name, contents=prompt, config=config
+                    )
+                    break
+                except Exception as error:
+                    if getattr(error, "code", None) not in {429, 500, 502, 503, 504} or retry == 2:
+                        raise
+                    time.sleep(retry + 1)
         text = response.text.strip().replace("```json", "").replace("```", "").strip()
         generated = json.loads(text)
         if not isinstance(generated, list) or len(generated) != count:
@@ -609,7 +618,7 @@ meaningfully different, use plausible distractors, and clear age-appropriate wor
         return generated, "Gemini"
     except Exception as error:
         reason = str(error).replace("\n", " ")[:180]
-        return generate_local_questions(subject, topic, notes, count, difficulty), f"local fallback (Gemini error: {reason})"
+        return generate_local_questions(subject, topic, notes, count, difficulty), f"local fallback after {attempts} Gemini attempt(s) (Gemini error: {reason})"
 
 
 def save_questions(questions, user_id):
@@ -827,7 +836,13 @@ def questions():
             for item in generated:
                 item["class_name"] = request.form.get("class_name", "").strip()
             save_questions(generated, current_user()["id"])
-            flash(f"Read {len(notes):,} characters from the lesson source and saved {len(generated)} questions using {source}.", "success")
+            if source.startswith("local fallback"):
+                flash(
+                    f"Gemini was unavailable after retries. Saved {len(generated)} locally generated questions; review them carefully before using them in an exam. {source}",
+                    "warning",
+                )
+            else:
+                flash(f"Read {len(notes):,} characters from the lesson source and saved {len(generated)} questions using {source}.", "success")
         except (ValueError, RuntimeError, json.JSONDecodeError) as error:
             flash(str(error), "error")
         except Exception as error:
@@ -858,15 +873,32 @@ def questions():
 def clear_questions():
     user = current_user()
     if user["role"] == "admin":
-        execute("DELETE FROM questions")
+        scope_sql = "1=1"
+        scope_params = []
     else:
         subjects = teacher_subjects(user)
         if subjects:
             placeholders = ",".join("?" for _ in subjects)
-            execute(f"DELETE FROM questions WHERE created_by = ? OR subject IN ({placeholders})", [user["id"], *subjects])
+            scope_sql = f"(created_by = ? OR subject IN ({placeholders}))"
+            scope_params = [user["id"], *subjects]
         else:
-            execute("DELETE FROM questions WHERE created_by = ?", (user["id"],))
-    flash("Saved questions cleared.", "success")
+            scope_sql = "created_by = ?"
+            scope_params = [user["id"]]
+    protected_sql = "NOT EXISTS (SELECT 1 FROM exam_questions eq WHERE eq.question_id = questions.id)"
+    eligible = query(
+        f"SELECT COUNT(*) AS count FROM questions WHERE {scope_sql} AND {protected_sql}",
+        scope_params, one=True,
+    )["count"]
+    visible = query(
+        f"SELECT COUNT(*) AS count FROM questions WHERE {scope_sql}",
+        scope_params, one=True,
+    )["count"]
+    execute(f"DELETE FROM questions WHERE {scope_sql} AND {protected_sql}", scope_params)
+    preserved = visible - eligible
+    if preserved:
+        flash(f"Cleared {eligible} unused question(s). Kept {preserved} question(s) already used in exams.", "success")
+    else:
+        flash(f"Cleared {eligible} unused question(s).", "success")
     return redirect(url_for("questions"))
 
 
@@ -1035,10 +1067,13 @@ def edit_question(question_id):
 @app.post("/questions/<int:question_id>/delete")
 @login_required("admin", "teacher")
 def delete_question(question_id):
-    question = query("SELECT created_by FROM questions WHERE id = ?", (question_id,), one=True)
+    question = query("SELECT created_by, subject FROM questions WHERE id = ?", (question_id,), one=True)
     user = current_user()
-    if not question or (user["role"] == "teacher" and query("SELECT subject FROM questions WHERE id=?", (question_id,), one=True)["subject"] not in teacher_subjects(user)):
+    if not question or (user["role"] == "teacher" and question["subject"] not in teacher_subjects(user)):
         flash("Teachers can delete only questions in their assigned subjects.", "error")
+        return redirect(url_for("questions"))
+    if query("SELECT 1 FROM exam_questions WHERE question_id = ?", (question_id,), one=True):
+        flash("This question is part of an exam and cannot be deleted.", "error")
         return redirect(url_for("questions"))
     execute("DELETE FROM questions WHERE id = ?", (question_id,))
     flash("Question deleted.", "success")
