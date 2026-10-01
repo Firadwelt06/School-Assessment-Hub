@@ -121,7 +121,7 @@ Ready-to-upload examples are included in:
 - `sample_data/students_sample.csv`
 - `sample_data/teachers_sample.csv`
 
-The sample accounts use intentionally simple test passwords and should only be used in a local test environment. Teacher imports require `full_name` and `password`; `username` and `class_name` are optional for teachers.
+The sample accounts use intentionally simple test passwords and should only be used in a local test environment. Teacher imports require `full_name` and `password`; `username` and `subjects` are optional. Teacher accounts do not use a class/cohort assignment.
 
 ## Student rankings and exam timer
 
@@ -144,7 +144,7 @@ Teachers can be assigned subjects by an administrator or through the teacher reg
 
 Clearing the question bank removes only questions that are not already attached to an exam. Questions used by exams are retained so clearing unused content cannot disrupt other teachers or existing exams.
 
-Class categories use two levels: students are assigned to arm classes such as `SS1 A` and `SS1 B`, while teachers and exam/question filters use the general cohort `SS1`. Selecting `SS1` therefore includes both arms. Administrators manage the student arm list, and the application derives the general cohort automatically.
+Class categories use two levels: students are assigned to named arms such as `SS1Pearl` and `SS1Coral`, while exam filters can use the general cohort `SS1`. Selecting `SS1` includes both arms. Administrators manage the student arm list, and the application derives the general cohort automatically. Once an administrator has saved a class list, that list is authoritative for registration and setup forms; old student class values no longer add unexpected options.
 
 Teacher and student registration is designed for supervised local-network sessions and does not ask for a password. For an internet-facing deployment, replace this with verified accounts or one-time access codes.
 

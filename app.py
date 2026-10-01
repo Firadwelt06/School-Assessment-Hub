@@ -464,9 +464,10 @@ def class_group(class_name):
 
 def class_options():
     configured = [value.strip() for value in school_settings().get("managed_classes", "").split(",") if value.strip()]
-    stored = [row["value"] for row in query("SELECT DISTINCT class_name AS value FROM users WHERE class_name != '' ORDER BY class_name")]
-    values = configured + stored
-    return sorted(set(values))
+    if configured:
+        return sorted(set(configured))
+    stored = [row["value"] for row in query("SELECT DISTINCT class_name AS value FROM users WHERE role = 'student' AND class_name != '' ORDER BY class_name")]
+    return sorted(set(stored))
 
 
 def class_group_options():
@@ -738,24 +739,23 @@ def login():
 def register_teacher():
     if request.method == "POST":
         full_name = request.form["full_name"].strip()
-        class_name = request.form["class_name"].strip()
         subjects = request.form["subjects"].strip()
         access_code = request.form["access_code"].strip()
         teacher_password_hash = school_settings().get("teacher_default_password_hash", "")
         if not teacher_password_hash:
             flash("Teacher registration is not configured yet. Ask the administrator for the teacher password.", "error")
-        elif not full_name or not class_name or not subjects or not valid_access_code(access_code, "teacher"):
-            flash("Name, class, subjects, and a valid, unexpired teacher access code are required.", "error")
+        elif not full_name or not subjects or not valid_access_code(access_code, "teacher"):
+            flash("Name, subjects, and a valid, unexpired teacher access code are required.", "error")
         else:
             username = teacher_username(full_name)
             user_id = execute(
                 "INSERT INTO users(username, full_name, password_hash, role, class_name, subjects, created_at) VALUES (?, ?, ?, 'teacher', ?, ?, ?)",
-                (username, full_name, teacher_password_hash, class_name, subjects, datetime.now().isoformat(timespec="seconds")),
+                (username, full_name, teacher_password_hash, "", subjects, datetime.now().isoformat(timespec="seconds")),
             )
             session["user_id"] = user_id
             flash("Teacher registration completed. Your sign-in username is shown on your dashboard.", "success")
             return redirect(url_for("dashboard"))
-    return render_template("register_teacher.html", classes=class_group_options())
+    return render_template("register_teacher.html")
 
 
 @app.route("/register/student", methods=["GET", "POST"])
@@ -1489,7 +1489,9 @@ def admin():
             flash("School branding updated.", "success")
         elif action == "user":
             try:
-                execute("INSERT INTO users(username, full_name, password_hash, role, class_name, subjects, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", (request.form["username"], request.form["full_name"], hash_password(request.form["password"]), request.form["role"], request.form.get("class_name", "").strip(), request.form.get("subjects", "").strip(), datetime.now().isoformat(timespec="seconds")))
+                role = request.form["role"]
+                class_name = request.form.get("class_name", "").strip() if role == "student" else ""
+                execute("INSERT INTO users(username, full_name, password_hash, role, class_name, subjects, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", (request.form["username"], request.form["full_name"], hash_password(request.form["password"]), role, class_name, request.form.get("subjects", "").strip(), datetime.now().isoformat(timespec="seconds")))
                 flash("User created.", "success")
             except DBIntegrityError:
                 flash("Username already exists.", "error")
@@ -1541,7 +1543,7 @@ def admin():
                         execute(
                             """INSERT INTO users(username, full_name, password_hash, role, class_name, subjects, created_at)
                             VALUES (?, ?, ?, 'teacher', ?, ?, ?)""",
-                            (username, full_name, hash_password(str(row["password"])), str(row.get("class_name", "")).strip(), str(row.get("subjects", "")).strip(), datetime.now().isoformat(timespec="seconds")),
+                            (username, full_name, hash_password(str(row["password"])), "", str(row.get("subjects", "")).strip(), datetime.now().isoformat(timespec="seconds")),
                         )
                         created += 1
                     flash(f"Imported {created} teachers.", "success")
