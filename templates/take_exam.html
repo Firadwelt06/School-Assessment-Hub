@@ -8,6 +8,20 @@
   const form = document.getElementById("exam-form");
   const warning = document.getElementById("timer-warning");
   let seconds = Number(timer.dataset.seconds);
+  let submissionConfirmed = false;
+  form.addEventListener("submit", (event) => {
+    if (submissionConfirmed) return;
+    event.preventDefault();
+    const unanswered = [...form.querySelectorAll(".cbt-question")]
+      .filter((question) => !question.querySelector('input[type="radio"]:checked')).length;
+    const message = unanswered
+      ? `You have ${unanswered} unanswered question${unanswered === 1 ? "" : "s"}. Submit your examination anyway?`
+      : "Are you sure you want to submit your examination? You cannot change your answers after submitting.";
+    if (window.confirm(message)) {
+      submissionConfirmed = true;
+      form.requestSubmit();
+    }
+  });
   const render = () => {
     const minutes = Math.floor(seconds / 60);
     const remaining = String(seconds % 60).padStart(2, "0");
