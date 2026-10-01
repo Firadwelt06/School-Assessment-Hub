@@ -1,11 +1,20 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="exam-header">{% if school.school_logo %}<img src="{{ url_for('uploads', filename=school.school_logo) }}" alt="School logo">{% endif %}<div><h1>{{ school.school_name }}</h1><p>{{ school.school_address }}</p><h2>{{ exam.title }}</h2><span>{{ exam.class_name }} · {{ exam.subject }} · {{ questions|length }} questions · {{ exam.duration_minutes }} minutes</span></div><div class="countdown" id="countdown" data-seconds="{{ remaining_seconds }}"><small>TIME REMAINING</small><strong>--:--</strong></div></div>
-<form method="post" class="cbt-form" id="exam-form"><div class="instructions">{{ exam.instructions }} <span id="timer-warning" class="timer-warning" role="alert"></span></div>{% for q in questions %}<section class="cbt-question"><div class="question-number">Question {{ loop.index }} of {{ questions|length }}</div>{% if q.image_path %}<img class="question-image" src="{{ url_for('uploads', filename=q.image_path) }}" alt="Question illustration">{% endif %}<h2>{{ q.stem }}</h2><div class="radio-options">{% for letter in ['A','B','C','D'] %}<label><input type="radio" name="question_{{ q.id }}" value="{{ letter }}"><span><b>{{ letter }}</b>{{ q['option_' + letter.lower()] }}</span></label>{% endfor %}</div></section>{% endfor %}<button class="button primary submit-exam">Submit examination</button></form>
+<form method="post" class="cbt-form" id="exam-form"><div class="instructions">{{ exam.instructions }} <span id="timer-warning" class="timer-warning" role="alert"></span></div>{% for q in questions %}<section class="cbt-question"><div class="question-number">Question {{ loop.index }} of {{ questions|length }}</div>{% if q.image_path %}<img class="question-image" src="{{ url_for('uploads', filename=q.image_path) }}" alt="Question illustration">{% endif %}<h2>{{ q.stem }}</h2><div class="radio-options">{% for letter in ['A','B','C','D'] %}<label><input type="radio" name="question_{{ q.id }}" value="{{ letter }}"><span><b>{{ letter }}</b>{{ q['option_' + letter.lower()] }}</span></label>{% endfor %}</div></section>{% endfor %}<button class="button primary submit-exam" type="submit">Submit examination</button></form>
+<dialog class="submit-dialog" id="submit-confirmation" aria-labelledby="submit-confirmation-title" aria-describedby="submit-confirmation-message">
+  <h2 id="submit-confirmation-title">Confirm submission</h2>
+  <p id="submit-confirmation-message"></p>
+  <div class="submit-dialog-actions"><button class="button secondary" id="return-to-exam" type="button">Go back to exam</button><button class="button primary" id="confirm-submit" type="button">Submit examination</button></div>
+</dialog>
 <script>
 (() => {
   const timer = document.getElementById("countdown");
   const form = document.getElementById("exam-form");
+  const submitDialog = document.getElementById("submit-confirmation");
+  const submitMessage = document.getElementById("submit-confirmation-message");
+  const returnToExam = document.getElementById("return-to-exam");
+  const confirmSubmit = document.getElementById("confirm-submit");
   const warning = document.getElementById("timer-warning");
   let seconds = Number(timer.dataset.seconds);
   let submissionConfirmed = false;
@@ -14,13 +23,17 @@
     event.preventDefault();
     const unanswered = [...form.querySelectorAll(".cbt-question")]
       .filter((question) => !question.querySelector('input[type="radio"]:checked')).length;
-    const message = unanswered
-      ? `You have ${unanswered} unanswered question${unanswered === 1 ? "" : "s"}. Submit your examination anyway?`
-      : "Are you sure you want to submit your examination? You cannot change your answers after submitting.";
-    if (window.confirm(message)) {
-      submissionConfirmed = true;
-      form.requestSubmit();
-    }
+    submitMessage.textContent = unanswered
+      ? `You have ${unanswered} unanswered question${unanswered === 1 ? "" : "s"}. You can go back to answer them, or submit your examination now.`
+      : "You have answered every question. Once submitted, you cannot change your answers.";
+    confirmSubmit.textContent = unanswered ? "Submit anyway" : "Yes, submit";
+    submitDialog.showModal();
+  });
+  returnToExam.addEventListener("click", () => submitDialog.close());
+  confirmSubmit.addEventListener("click", () => {
+    submissionConfirmed = true;
+    submitDialog.close();
+    form.requestSubmit();
   });
   const render = () => {
     const minutes = Math.floor(seconds / 60);
