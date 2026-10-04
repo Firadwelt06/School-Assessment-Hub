@@ -13,7 +13,7 @@ from functools import wraps
 from pathlib import Path
 
 import pandas as pd
-from flask import Flask, flash, redirect, render_template, request, send_file, session, url_for
+from flask import Flask, flash, jsonify, redirect, render_template, request, send_file, session, url_for
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
 
@@ -122,6 +122,99 @@ def execute(sql, params=()):
     last_id = cursor.lastrowid
     connection.close()
     return last_id
+
+
+def execute_on_connection(connection, sql, params=()):
+    if DB_ENGINE == "mysql":
+        cursor = connection.cursor()
+        cursor.execute(sql_params(sql), params)
+        return cursor
+    return connection.execute(sql, params)
+
+
+def save_attempt_answers(attempt_id, answers, questions, submit=False):
+    connection = db()
+    try:
+        if DB_ENGINE == "mysql":
+            connection.begin()
+            attempt = execute_on_connection(
+                connection,
+                "SELECT id, submitted_at FROM attempts WHERE id = ? FOR UPDATE",
+                (attempt_id,),
+            ).fetchone()
+        else:
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = execute_on_connection(
+                connection,
+                "SELECT id, submitted_at FROM attempts WHERE id = ?",
+                (attempt_id,),
+            ).fetchone()
+        if not attempt:
+            connection.rollback()
+            return "missing"
+        if attempt["submitted_at"]:
+            connection.commit()
+            return "submitted"
+
+        for question_id, answer in answers.items():
+            if DB_ENGINE == "mysql":
+                save_sql = """INSERT INTO responses(attempt_id, question_id, answer, correct)
+                    VALUES (?, ?, ?, 0) ON DUPLICATE KEY UPDATE answer=VALUES(answer), correct=0"""
+            else:
+                save_sql = """INSERT INTO responses(attempt_id, question_id, answer, correct)
+                    VALUES (?, ?, ?, 0) ON CONFLICT(attempt_id, question_id)
+                    DO UPDATE SET answer=excluded.answer, correct=0"""
+            execute_on_connection(connection, save_sql, (attempt_id, question_id, answer))
+
+        if submit:
+            stored_answers = {
+                row["question_id"]: row["answer"]
+                for row in execute_on_connection(
+                    connection,
+                    "SELECT question_id, answer FROM responses WHERE attempt_id = ?",
+                    (attempt_id,),
+                ).fetchall()
+            }
+            score = 0
+            for question in questions:
+                answer = stored_answers.get(question["id"], "")
+                correct = int(answer == question["correct_option"])
+                score += correct
+                if DB_ENGINE == "mysql":
+                    save_sql = """INSERT INTO responses(attempt_id, question_id, answer, correct)
+                        VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE answer=VALUES(answer), correct=VALUES(correct)"""
+                else:
+                    save_sql = """INSERT INTO responses(attempt_id, question_id, answer, correct)
+                        VALUES (?, ?, ?, ?) ON CONFLICT(attempt_id, question_id)
+                        DO UPDATE SET answer=excluded.answer, correct=excluded.correct"""
+                execute_on_connection(
+                    connection, save_sql, (attempt_id, question["id"], answer, correct)
+                )
+            execute_on_connection(
+                connection,
+                "UPDATE attempts SET score = ?, total = ?, submitted_at = ? WHERE id = ? AND submitted_at = ''",
+                (score, len(questions), datetime.now().isoformat(timespec="seconds"), attempt_id),
+            )
+
+        connection.commit()
+        return "submitted" if submit else "saved"
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def attempt_status(attempt):
+    if attempt["submitted_at"]:
+        return "Submitted"
+    try:
+        started = datetime.fromisoformat(attempt["started_at"])
+    except (TypeError, ValueError):
+        return "In progress"
+    if (datetime.now() - started).total_seconds() >= attempt["duration_minutes"] * 60:
+        return "Time elapsed · awaiting reconnection"
+    return "In progress"
 
 
 def upsert_setting(key, value):
@@ -826,9 +919,29 @@ def dashboard():
             exam_params.append(user["id"])
     exam_sql += " GROUP BY e.id ORDER BY e.id DESC"
     exams = query(exam_sql, exam_params)
+    recent_attempts = []
+    if user["role"] in ("admin", "teacher"):
+        attempt_sql = """SELECT a.id, a.score, a.total, a.started_at, a.submitted_at,
+            e.duration_minutes, u.full_name, u.class_name, e.title
+            FROM attempts a JOIN users u ON u.id = a.student_id
+            JOIN exams e ON e.id = a.exam_id WHERE u.role = 'student'"""
+        attempt_params = []
+        if user["role"] == "teacher":
+            subjects = teacher_subjects(user)
+            if subjects:
+                attempt_sql += " AND e.subject IN (" + ",".join("?" for _ in subjects) + ")"
+                attempt_params.extend(subjects)
+            else:
+                attempt_sql += " AND e.created_by = ?"
+                attempt_params.append(user["id"])
+        attempt_sql += " ORDER BY a.started_at DESC LIMIT 25"
+        recent_attempts = [
+            {**dict(attempt), "status": attempt_status(attempt)}
+            for attempt in query(attempt_sql, attempt_params)
+        ]
     subjects = [row["subject"] for row in query("SELECT DISTINCT subject FROM exams ORDER BY subject")]
     classes = class_options()
-    return render_template("dashboard.html", stats=stats, exams=exams, user=user, subjects=subjects, classes=classes, subject_filter=subject_filter, status_filter=status_filter, exam_type_filter=exam_type_filter, exam_types=EXAM_TYPES)
+    return render_template("dashboard.html", stats=stats, exams=exams, recent_attempts=recent_attempts, user=user, subjects=subjects, classes=classes, subject_filter=subject_filter, status_filter=status_filter, exam_type_filter=exam_type_filter, exam_types=EXAM_TYPES)
 
 
 @app.route("/questions", methods=["GET", "POST"])
@@ -1228,7 +1341,6 @@ def take_exam(exam_id):
     if existing and existing["submitted_at"] and not permission:
         flash("You have already submitted this exam.", "error")
         return redirect(url_for("dashboard"))
-    force_submitted = False
     if existing and existing["submitted_at"] and permission:
         # Reuse the attempt row with a fresh timer. This avoids a unique-key
         # collision if the student opens the rewrite link more than once.
@@ -1244,56 +1356,134 @@ def take_exam(exam_id):
             (existing["id"],), one=True,
         )
         permission = None
-    if existing and existing["started_at"]:
+    if existing:
         try:
             started = datetime.fromisoformat(existing["started_at"])
-        except ValueError:
+        except (TypeError, ValueError):
             started = datetime.now()
             execute(
                 "UPDATE attempts SET started_at = ?, submitted_at = '' WHERE id = ?",
                 (started.isoformat(timespec="seconds"), existing["id"]),
             )
-        if (datetime.now() - started).total_seconds() > exam["duration_minutes"] * 60:
-            if permission:
-                now = datetime.now().isoformat(timespec="seconds")
-                execute("DELETE FROM responses WHERE attempt_id = ?", (existing["id"],))
-                execute("DELETE FROM rewrite_permissions WHERE id = ?", (permission["id"],))
-                execute("UPDATE attempts SET score=0, total=0, started_at=?, submitted_at='' WHERE id=?", (now, existing["id"]))
-                existing = query("SELECT id, started_at, submitted_at FROM attempts WHERE id=?", (existing["id"],), one=True)
-                permission = None
-            elif request.method == "POST":
-                force_submitted = True
-            else:
-                flash("This exam window has expired.", "error")
-                return redirect(url_for("dashboard"))
+            existing = query(
+                "SELECT id, started_at, submitted_at FROM attempts WHERE id = ?",
+                (existing["id"],), one=True,
+            )
     questions = query("SELECT q.* FROM questions q JOIN exam_questions eq ON eq.question_id=q.id WHERE eq.exam_id=? ORDER BY eq.position", (exam_id,))
     if request.method == "POST":
-        answers = {question["id"]: request.form.get(f"question_{question['id']}", "") for question in questions}
-        score = sum(answer == question["correct_option"] for question, answer in zip(questions, answers.values()))
-        started_at = existing and query("SELECT started_at FROM attempts WHERE id = ?", (existing["id"],), one=True)["started_at"] or datetime.now().isoformat(timespec="seconds")
-        now = datetime.now().isoformat(timespec="seconds")
-        if existing:
-            execute("DELETE FROM responses WHERE attempt_id = ?", (existing["id"],))
-            execute(
-                "UPDATE attempts SET score = ?, total = ?, started_at = ?, submitted_at = ? WHERE id = ?",
-                (score, len(questions), started_at, now, existing["id"]),
-            )
-            attempt_id = existing["id"]
-        else:
-            attempt_id = execute("INSERT INTO attempts(exam_id, student_id, score, total, started_at, submitted_at) VALUES (?, ?, ?, ?, ?, ?)", (exam_id, current_user()["id"], score, len(questions), started_at, now))
+        if not existing:
+            flash("Start the exam before submitting answers.", "error")
+            return redirect(url_for("dashboard"))
+        answers = {}
         for question in questions:
-            execute("INSERT INTO responses(attempt_id, question_id, answer, correct) VALUES (?, ?, ?, ?)", (attempt_id, question["id"], answers[question["id"]], int(answers[question["id"]] == question["correct_option"])))
-        return render_template("result.html", exam=exam, force_submitted=force_submitted)
+            field = f"question_{question['id']}"
+            if field in request.form:
+                answer = request.form[field]
+                if answer not in ("A", "B", "C", "D"):
+                    flash("An answer was invalid. Please review your responses and try again.", "error")
+                    return redirect(url_for("take_exam", exam_id=exam_id))
+                answers[question["id"]] = answer
+        save_attempt_answers(existing["id"], answers, questions, submit=True)
+        return redirect(url_for("exam_result", exam_id=exam_id))
     if not existing:
         now = datetime.now().isoformat(timespec="seconds")
-        execute(
-            "INSERT INTO attempts(exam_id, student_id, score, total, started_at, submitted_at) VALUES (?, ?, 0, ?, ?, '')",
-            (exam_id, current_user()["id"], len(questions), now),
+        try:
+            execute(
+                "INSERT INTO attempts(exam_id, student_id, score, total, started_at, submitted_at) VALUES (?, ?, 0, ?, ?, '')",
+                (exam_id, current_user()["id"], len(questions), now),
+            )
+        except DBIntegrityError:
+            pass
+        existing = query(
+            "SELECT id, started_at, submitted_at FROM attempts WHERE exam_id = ? AND student_id = ?",
+            (exam_id, current_user()["id"]), one=True,
         )
-    started_attempt = query("SELECT started_at FROM attempts WHERE exam_id = ? AND student_id = ?", (exam_id, current_user()["id"]), one=True)
-    elapsed = max(0, int((datetime.now() - datetime.fromisoformat(started_attempt["started_at"])).total_seconds()))
+    started = datetime.fromisoformat(existing["started_at"])
+    elapsed = max(0, int((datetime.now() - started).total_seconds()))
     remaining_seconds = max(0, exam["duration_minutes"] * 60 - elapsed)
-    return render_template("take_exam.html", exam=exam, questions=questions, remaining_seconds=remaining_seconds)
+    if remaining_seconds == 0:
+        save_attempt_answers(existing["id"], {}, questions, submit=True)
+        return redirect(url_for("exam_result", exam_id=exam_id))
+    saved_answers = {
+        row["question_id"]: row["answer"]
+        for row in query(
+            "SELECT question_id, answer FROM responses WHERE attempt_id = ?",
+            (existing["id"],),
+        )
+    }
+    return render_template(
+        "take_exam.html", exam=exam, questions=questions,
+        remaining_seconds=remaining_seconds, attempt_id=existing["id"],
+        attempt_started_at=existing["started_at"], saved_answers=saved_answers,
+    )
+
+
+@app.post("/exams/<int:exam_id>/save")
+@login_required("student")
+def save_exam_answers(exam_id):
+    attempt = query(
+        """SELECT a.id, a.started_at, a.submitted_at, e.duration_minutes
+        FROM attempts a JOIN exams e ON e.id = a.exam_id
+        WHERE a.exam_id = ? AND a.student_id = ?""",
+        (exam_id, current_user()["id"]), one=True,
+    )
+    if not attempt:
+        return jsonify(error="No active attempt was found for this examination."), 404
+    if not request.is_json:
+        return jsonify(error="Answer updates must use JSON."), 400
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or not isinstance(payload.get("answers"), dict):
+        return jsonify(error="The answer update is invalid."), 400
+    questions = query(
+        """SELECT q.id, q.correct_option FROM questions q
+        JOIN exam_questions eq ON eq.question_id = q.id
+        WHERE eq.exam_id = ? ORDER BY eq.position""",
+        (exam_id,),
+    )
+    valid_question_ids = {question["id"] for question in questions}
+    answers = {}
+    try:
+        for raw_id, answer in payload["answers"].items():
+            question_id = int(raw_id)
+            if question_id not in valid_question_ids or answer not in ("", "A", "B", "C", "D"):
+                return jsonify(error="An answer update contained an invalid question or choice."), 400
+            answers[question_id] = answer
+        started = datetime.fromisoformat(attempt["started_at"])
+    except (TypeError, ValueError):
+        return jsonify(error="The answer update or attempt timer is invalid."), 400
+    expired = (datetime.now() - started).total_seconds() >= attempt["duration_minutes"] * 60
+    if attempt["submitted_at"]:
+        return jsonify(status="submitted", result_url=url_for("exam_result", exam_id=exam_id))
+    result = save_attempt_answers(
+        attempt["id"], answers, questions,
+        submit=payload.get("submit") is True or expired,
+    )
+    if result == "missing":
+        return jsonify(error="The exam attempt could not be found."), 404
+    if result == "submitted":
+        return jsonify(status="submitted", result_url=url_for("exam_result", exam_id=exam_id))
+    return jsonify(status="saved")
+
+
+@app.get("/exams/<int:exam_id>/result")
+@login_required("student")
+def exam_result(exam_id):
+    result = query(
+        """SELECT e.*, a.started_at, a.submitted_at FROM attempts a
+        JOIN exams e ON e.id = a.exam_id
+        WHERE a.exam_id = ? AND a.student_id = ? AND a.submitted_at != ''""",
+        (exam_id, current_user()["id"]), one=True,
+    )
+    if not result:
+        flash("No submitted result was found for this examination.", "error")
+        return redirect(url_for("dashboard"))
+    try:
+        started = datetime.fromisoformat(result["started_at"])
+        submitted = datetime.fromisoformat(result["submitted_at"])
+        force_submitted = (submitted - started).total_seconds() >= result["duration_minutes"] * 60
+    except (TypeError, ValueError):
+        force_submitted = False
+    return render_template("result.html", exam=result, force_submitted=force_submitted)
 
 
 @app.post("/admin/rewrite/<int:attempt_id>")
@@ -1646,12 +1836,16 @@ def admin():
         user_sql += " AND class_name = ?"
         user_params.append(class_filter)
     user_sql += " ORDER BY id"
-    attempts = query(
-        """SELECT a.id, a.score, a.total, a.submitted_at, u.full_name, u.class_name, e.title,
+    attempts = [
+        {**dict(attempt), "status": attempt_status(attempt)}
+        for attempt in query(
+        """SELECT a.id, a.score, a.total, a.started_at, a.submitted_at, e.duration_minutes,
+        u.full_name, u.class_name, e.title,
         EXISTS(SELECT 1 FROM rewrite_permissions rp WHERE rp.attempt_id=a.id) AS rewrite_granted
         FROM attempts a JOIN users u ON u.id=a.student_id JOIN exams e ON e.id=a.exam_id
         ORDER BY CASE WHEN a.submitted_at = '' THEN 0 ELSE 1 END, a.submitted_at DESC"""
-    )
+        )
+    ]
     return render_template(
         "admin.html",
         users=query(user_sql, user_params),

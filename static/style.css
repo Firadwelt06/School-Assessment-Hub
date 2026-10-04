@@ -21,6 +21,7 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-vis
 input:not([type="checkbox"]):not([type="radio"]),select,textarea{min-height:44px}
 .check,.pick,.radio-options label{min-height:44px}
 .table-wrap[tabindex="0"]{border-radius:6px}
+.attempt-progress{padding:16px 20px}.progress-heading{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}.question-navigator{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.question-navigator a{display:grid;place-items:center;min-width:44px;min-height:44px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--navy);font-weight:700;text-decoration:none}.question-navigator a.answered{background:#e4f5ed;border-color:#28734b;color:#174d34}.question-navigator a.current{outline:3px solid #145b94;outline-offset:2px}.save-status{margin:0;color:var(--muted);font-size:13px}.cbt-question{scroll-margin-top:20px}
 @media(max-width:800px){.admin-nav{position:relative}.section-title{align-items:flex-start;gap:12px;flex-wrap:wrap}.exam-row{align-items:flex-start;gap:12px}.exam-header{flex-wrap:wrap}.countdown{position:fixed;top:auto;right:10px;bottom:10px}.login-card{padding:26px}.submit-dialog-actions{display:grid}.submit-dialog-actions button{width:100%}}
 body:has(.cbt-form) main{padding-bottom:100px}
 .offline-import-form{display:inline-flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:10px}.offline-import-form label{width:100%}

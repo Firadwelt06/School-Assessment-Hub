@@ -2,6 +2,8 @@
 
 A professional Flask-based local-network CBT platform for schools.
 
+Version 3.0 focuses on exam reliability: students' answers are saved to their attempt, restored after refresh, and finalized against a server-enforced timer.
+
 ## Features
 
 - Role-based sign-in for administrators, teachers, and students.
@@ -11,6 +13,8 @@ A professional Flask-based local-network CBT platform for schools.
 - Teacher question bank and exam builder.
 - Branded CBT paper header using the administrator's school name, address, and logo.
 - Student browser-based CBT examination experience.
+- Attempt-scoped answer autosaving, refresh recovery, offline browser drafts, and clear connection/save status.
+- Question navigator with answered/unanswered progress and staff visibility into in-progress and elapsed attempts.
 - Automatic marking with subject and overall student rankings by class.
 - Five administrator-selectable themes or an uploaded image theme.
 - Manual question entry with LaTeX formula support.
@@ -124,10 +128,13 @@ Ready-to-upload examples are included in:
 
 The sample accounts use intentionally simple test passwords and should only be used in a local test environment. Teacher imports require `full_name` and `password`; `username` and `subjects` are optional. Teacher accounts do not use a class/cohort assignment.
 
-## Student rankings and exam timer
+## Student rankings, exam timer, and answer recovery
 
-Teachers and administrators can open **Student Rankings** to see subject rankings within each class and overall rankings within each class. The class filter also offers combined cohorts such as `SS1`, which combines `SS1 A`, `SS1 B`, and similar sections. Rankings can be narrowed by subject, exam type, and subject/overall view. Students see a countdown timer during every CBT exam. At five minutes and one minute remaining, the timer changes color and displays a warning. When it reaches zero, the exam is submitted automatically.
-The server also records the start time and rejects submissions after the configured duration. Refreshing the page does not reset the timer.
+Teachers and administrators can open **Student Rankings** to see subject rankings within each class and overall rankings within each class. The class filter also offers combined cohorts such as `SS1`, which combines `SS1 A`, `SS1 B`, and similar sections. Rankings can be narrowed by subject, exam type, and subject/overall view.
+
+During an exam, each answer is saved to that student's active attempt while connected. Refreshing or reopening the exam restores server-saved answers and does not reset the server-recorded timer. If the network drops, the page keeps a local recovery draft in that browser and syncs it after reconnection; the save indicator shows whether changes have reached the server. Students can use the question navigator to jump between questions and see answered/unanswered progress. Teachers and administrators see recent attempt state on their dashboard; elapsed attempts are finalized when the student reconnects or reopens the exam.
+
+The countdown stays visible. At five minutes and one minute remaining, it changes color and displays a warning. The server enforces the configured duration and automatically finalizes saved answers at expiry. A brief network interruption can recover through the browser draft, but a device/browser loss before an offline draft syncs, a server outage, or server power loss still requires the school to restore service and use current database backups.
 
 Administrators can delete teacher and student access from **Administration**. The account is disabled rather than physically removed so historical scores and rankings remain intact.
 
@@ -163,7 +170,7 @@ Administrators can publish/unpublish or permanently remove exams, enable/disable
 
 For a more professional production release, add administrator approval for self-registration, CSRF protection, scheduled exams, printable PDF report cards, question versioning, audit logs, HTTPS, and automated MySQL backups.
 
-The current LAN design may fail or become unreliable with many simultaneous students, unstable Wi-Fi, browser refreshes during submission, lost server power, scanned PDFs without OCR, duplicate names belonging to different people, or users sharing the same device/session. Passwordless registration is convenient for supervised testing but is not suitable for an untrusted network without access codes or approval.
+The current LAN design may fail or become unreliable with many simultaneous students, a server outage or lost server power, scanned PDFs without OCR, duplicate names belonging to different people, or users sharing the same device/session. Answer recovery depends on the school server for shared persistence; browser-local drafts are limited to the same browser/device and cannot protect unsynced answers from device or browser-storage loss. Passwordless registration is convenient for supervised testing but is not suitable for an untrusted network without access codes or approval.
 
 ## Result reports
 

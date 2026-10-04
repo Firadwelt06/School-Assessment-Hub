@@ -1,7 +1,18 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="exam-header">{% if school.school_logo %}<img src="{{ url_for('uploads', filename=school.school_logo) }}" alt="School logo">{% endif %}<div><h1>{{ school.school_name }}</h1><p>{{ school.school_address }}</p><h2>{{ exam.title }}</h2><span>{{ exam.class_name }} · {{ exam.subject }} · {{ questions|length }} questions · {{ exam.duration_minutes }} minutes</span></div><div class="countdown" id="countdown" role="timer" aria-label="Time remaining" aria-live="off" data-seconds="{{ remaining_seconds }}"><small>TIME REMAINING</small><strong>--:--</strong></div></div>
-<form method="post" class="cbt-form" id="exam-form"><div class="instructions">{{ exam.instructions }} <span id="timer-warning" class="timer-warning" role="alert" aria-live="assertive"></span></div>{% for q in questions %}<section class="cbt-question" aria-labelledby="question-title-{{ q.id }}"><div class="question-number">Question {{ loop.index }} of {{ questions|length }}</div>{% if q.image_path %}<img class="question-image" src="{{ url_for('uploads', filename=q.image_path) }}" alt="Question illustration">{% endif %}<h2 id="question-title-{{ q.id }}">{{ q.stem }}</h2><div class="radio-options" role="radiogroup" aria-labelledby="question-title-{{ q.id }}">{% for letter in ['A','B','C','D'] %}<label><input type="radio" name="question_{{ q.id }}" value="{{ letter }}"><span><b>{{ letter }}</b>{{ q['option_' + letter.lower()] }}</span></label>{% endfor %}</div></section>{% endfor %}<button class="button primary submit-exam" type="submit">Submit examination</button></form>
+<form method="post" class="cbt-form" id="exam-form" data-save-url="{{ url_for('save_exam_answers', exam_id=exam.id) }}" data-attempt-id="{{ attempt_id }}" data-attempt-started="{{ attempt_started_at }}">
+  <div class="instructions">{{ exam.instructions }} <span id="timer-warning" class="timer-warning" role="alert" aria-live="assertive"></span></div>
+  <section class="attempt-progress panel" aria-label="Examination progress">
+    <div class="progress-heading"><strong>Answer progress</strong><span id="answer-progress" role="status" aria-live="polite"></span></div>
+    <nav class="question-navigator" aria-label="Question navigator">
+      {% for q in questions %}<a href="#question-{{ q.id }}" data-question-nav="{{ q.id }}" aria-label="Question {{ loop.index }}, unanswered">{{ loop.index }}</a>{% endfor %}
+    </nav>
+    <p id="save-status" class="save-status" role="status" aria-live="polite">Changes save automatically while connected.</p>
+  </section>
+  {% for q in questions %}<section class="cbt-question" id="question-{{ q.id }}" aria-labelledby="question-title-{{ q.id }}" tabindex="-1"><div class="question-number">Question {{ loop.index }} of {{ questions|length }}</div>{% if q.image_path %}<img class="question-image" src="{{ url_for('uploads', filename=q.image_path) }}" alt="Question illustration">{% endif %}<h2 id="question-title-{{ q.id }}">{{ q.stem }}</h2><div class="radio-options" role="radiogroup" aria-labelledby="question-title-{{ q.id }}">{% for letter in ['A','B','C','D'] %}<label><input type="radio" name="question_{{ q.id }}" value="{{ letter }}" {% if saved_answers.get(q.id) == letter %}checked{% endif %}><span><b>{{ letter }}</b>{{ q['option_' + letter.lower()] }}</span></label>{% endfor %}</div></section>{% endfor %}
+  <button class="button primary submit-exam" type="submit">Submit examination</button>
+</form>
 <dialog class="submit-dialog" id="submit-confirmation" aria-labelledby="submit-confirmation-title" aria-describedby="submit-confirmation-message">
   <h2 id="submit-confirmation-title">Confirm submission</h2>
   <p id="submit-confirmation-message"></p>
@@ -16,10 +27,170 @@
   const returnToExam = document.getElementById("return-to-exam");
   const confirmSubmit = document.getElementById("confirm-submit");
   const warning = document.getElementById("timer-warning");
-  let seconds = Number(timer.dataset.seconds);
-  let submissionConfirmed = false;
+  const saveStatus = document.getElementById("save-status");
+  const progress = document.getElementById("answer-progress");
+  const radios = [...form.querySelectorAll('input[type="radio"]')];
+  const questions = [...form.querySelectorAll(".cbt-question")];
+  const navigatorLinks = [...form.querySelectorAll("[data-question-nav]")];
+  const storageKey = `assessment-attempt:${form.dataset.attemptId}:${form.dataset.attemptStarted}`;
+  const deadline = Date.now() + Number(timer.dataset.seconds) * 1000;
+  const pendingAnswers = new Map();
+  let changedVersion = 0;
+  let saving = false;
+  let dirty = false;
+  let submitPending = false;
+  let retryTimer = 0;
+
+  const loadLocalDraft = () => {
+    const draft = JSON.parse(localStorage.getItem(storageKey) || "null");
+    return draft && typeof draft === "object" && !Array.isArray(draft) ? draft : {};
+  };
+  const storeLocalDraft = () => {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify({
+        ...loadLocalDraft(),
+        ...Object.fromEntries(pendingAnswers)
+      }));
+      return true;
+    } catch {
+      saveStatus.textContent = "This browser could not keep a local recovery copy. Server saving will continue while connected.";
+      return false;
+    }
+  };
+  const clearSavedDraftAnswers = (answerPatch) => {
+    try {
+      const draft = loadLocalDraft();
+      for (const [questionId, answer] of Object.entries(answerPatch)) {
+        if (draft[questionId] === answer) delete draft[questionId];
+      }
+      if (Object.keys(draft).length) localStorage.setItem(storageKey, JSON.stringify(draft));
+      else localStorage.removeItem(storageKey);
+    } catch {}
+  };
+  const updateProgress = () => {
+    let answered = 0;
+    questions.forEach((question, index) => {
+      const isAnswered = Boolean(question.querySelector('input[type="radio"]:checked'));
+      if (isAnswered) answered += 1;
+      navigatorLinks[index].classList.toggle("answered", isAnswered);
+      navigatorLinks[index].setAttribute("aria-label", `Question ${index + 1}, ${isAnswered ? "answered" : "unanswered"}`);
+    });
+    progress.textContent = `${answered} of ${questions.length} answered · ${questions.length - answered} unanswered`;
+  };
+  const restoreLocalDraft = () => {
+    try {
+      const draft = loadLocalDraft();
+      let restored = false;
+      for (const [questionId, answer] of Object.entries(draft)) {
+        if (!["A", "B", "C", "D"].includes(answer)) continue;
+        const input = form.querySelector(`input[name="question_${CSS.escape(questionId)}"][value="${answer}"]`);
+        if (input) {
+          input.checked = true;
+          pendingAnswers.set(questionId, answer);
+          restored = true;
+        }
+      }
+      if (restored) {
+        changedVersion += 1;
+        dirty = true;
+      }
+      return restored;
+    } catch {
+      saveStatus.textContent = "A local recovery copy could not be read. Answers already saved to the school server remain available.";
+      return false;
+    }
+  };
+  const queueSave = (delay = 400) => {
+    window.clearTimeout(retryTimer);
+    retryTimer = window.setTimeout(saveAnswers, delay);
+  };
+  const saveAnswers = async () => {
+    if ((!dirty && !submitPending) || saving) return;
+    if (!navigator.onLine) {
+      saveStatus.textContent = "Offline — unsaved answers are kept in this browser and will sync when reconnected.";
+      return;
+    }
+    saving = true;
+    let saveAgain = false;
+    const version = changedVersion;
+    const answerPatch = Object.fromEntries(pendingAnswers);
+    const submitting = submitPending;
+    saveStatus.textContent = submitting ? "Submitting examination…" : "Saving answers…";
+    try {
+      const response = await fetch(form.dataset.saveUrl, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({answers: answerPatch, submit: submitting})
+      });
+      if (!response.headers.get("content-type")?.includes("application/json")) {
+        saveStatus.textContent = "Your sign-in may have expired. Reconnect and sign in to continue saving.";
+        return;
+      }
+      const result = await response.json();
+      if (!response.ok) {
+        saveStatus.textContent = result.error || "Answers could not be saved. Please try again.";
+        if (response.status >= 500) queueSave(5000);
+      } else if (result.status === "submitted") {
+        submitPending = false;
+        dirty = false;
+        pendingAnswers.clear();
+        try { localStorage.removeItem(storageKey); } catch {}
+        window.location.assign(result.result_url);
+      } else {
+        for (const [questionId, answer] of Object.entries(answerPatch)) {
+          if (pendingAnswers.get(questionId) === answer) pendingAnswers.delete(questionId);
+        }
+        clearSavedDraftAnswers(answerPatch);
+        dirty = pendingAnswers.size > 0;
+        if (!dirty) {
+          saveStatus.textContent = "All answers saved.";
+        } else {
+          saveStatus.textContent = "Saving latest answers…";
+          saveAgain = true;
+        }
+        if (submitPending) saveAgain = true;
+      }
+    } catch {
+      saveStatus.textContent = "Connection interrupted — unsaved answers are kept in this browser and will sync when reconnected.";
+      queueSave(5000);
+    } finally {
+      saving = false;
+      if ((saveAgain || changedVersion !== version) && navigator.onLine) queueSave(0);
+    }
+  };
+
+  restoreLocalDraft();
+  updateProgress();
+  if (dirty) queueSave(0);
+  radios.forEach((input) => input.addEventListener("change", () => {
+    changedVersion += 1;
+    dirty = true;
+    pendingAnswers.set(input.name.replace("question_", ""), input.value);
+    storeLocalDraft();
+    updateProgress();
+    saveStatus.textContent = "Answer changed — saving…";
+    queueSave();
+  }));
+  window.addEventListener("online", () => {
+    if (dirty || submitPending) queueSave(0);
+    else saveStatus.textContent = "Connection restored. All answers are saved.";
+  });
+  window.addEventListener("offline", () => {
+    if (dirty || submitPending) saveStatus.textContent = "Offline — unsaved answers are kept in this browser and will sync when reconnected.";
+  });
+  window.addEventListener("pagehide", () => {
+    if (!dirty || saving) return;
+    const body = new Blob([JSON.stringify({answers: Object.fromEntries(pendingAnswers), submit: submitPending})], {type: "application/json"});
+    navigator.sendBeacon(form.dataset.saveUrl, body);
+  });
+  window.addEventListener("beforeunload", (event) => {
+    if (!dirty && !submitPending) return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
+
   form.addEventListener("submit", (event) => {
-    if (submissionConfirmed) return;
     event.preventDefault();
     const unanswered = [...form.querySelectorAll(".cbt-question")]
       .filter((question) => !question.querySelector('input[type="radio"]:checked')).length;
@@ -31,11 +202,18 @@
   });
   returnToExam.addEventListener("click", () => submitDialog.close());
   confirmSubmit.addEventListener("click", () => {
-    submissionConfirmed = true;
+    submitPending = true;
+    dirty = true;
     submitDialog.close();
-    form.requestSubmit();
+    queueSave(0);
+  });
+  questions.forEach((question, index) => {
+    question.addEventListener("focusin", () => navigatorLinks.forEach((link, linkIndex) => {
+      link.classList.toggle("current", index === linkIndex);
+    }));
   });
   const render = () => {
+    const seconds = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
     const minutes = Math.floor(seconds / 60);
     const remaining = String(seconds % 60).padStart(2, "0");
     timer.querySelector("strong").textContent = `${String(minutes).padStart(2, "0")}:${remaining}`;
@@ -48,10 +226,11 @@
     }
     if (seconds <= 0) {
       warning.textContent = "Time is up. Submitting your examination...";
-      form.submit();
+      submitPending = true;
+      dirty = true;
+      queueSave(0);
       return;
     }
-    seconds -= 1;
     window.setTimeout(render, 1000);
   };
   render();
