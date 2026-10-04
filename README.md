@@ -18,6 +18,7 @@ A professional Flask-based local-network CBT platform for schools.
 - CSV import for teachers and students.
 - Subject, topic, and class metadata on every question.
 - MySQL storage for reliable multi-user school LAN deployment.
+- Accessibility improvements including keyboard skip navigation, visible focus, screen-reader status announcements, semantic exam answer groups, accessible chart summaries, and reduced-motion support.
 
 ## Run locally
 
