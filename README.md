@@ -219,3 +219,7 @@ Carbon dioxide and water are raw materials...
 ```
 
 If the application reports `local (GEMINI_API_KEY is not set)`, the running Flask process cannot see the environment variable. Set it in the same PowerShell window before running `python app.py`. Temporary Gemini service errors are retried before fallback; if it reports `local fallback after ... Gemini attempt(s)`, review the generated questions before including them in an exam.
+
+## AI acknowledgment and review
+
+The application uses AI-assisted generation to draft questions from teacher-provided lesson notes. AI-generated questions and answers may be inaccurate, incomplete, or unsuitable for a particular class. Teachers should verify the content, answer key, and curriculum alignment before using generated material in an exam; responsibility for the final assessment remains with the school and its educators.
