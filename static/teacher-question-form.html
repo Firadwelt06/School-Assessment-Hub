@@ -15,6 +15,10 @@
     button{border:0;border-radius:8px;padding:14px 18px;font:inherit;font-weight:700;cursor:pointer;margin:5px 5px 5px 0}
     .primary{background:#1769aa;color:#fff}.secondary{background:#dceaf2;color:#17324d}.danger{background:#fee2e2;color:#991b1b}
     #status{font-weight:700;min-height:24px}.small{font-size:14px;color:#536b7d}
+    .example{padding:12px;background:#f5f8fa;border-radius:8px;overflow:auto}.example pre{white-space:pre-wrap;margin:0}
+    .preview-question{border:1px solid #cbd8df;border-left:4px solid #16877d;border-radius:8px;padding:14px 18px;margin:12px 0}
+    .preview-question h3{margin:0 0 8px}.preview-question ul{padding-left:24px}.error{color:#991b1b;font-weight:700}.success{color:#17613a;font-weight:700}
+    button:disabled{opacity:.55;cursor:not-allowed}
     @media(max-width:650px){.grid{grid-template-columns:1fr}.wrap{padding:10px}}
   </style>
 </head>
@@ -33,6 +37,27 @@
       <label>Class<input id="class_name" placeholder="Example: SS1 A"></label>
       <label>Difficulty<select id="difficulty"><option value="easy">Easy</option><option value="medium" selected>Medium</option><option value="hard">Hard</option></select></label>
     </div>
+  </section>
+  <section class="card">
+    <h2>Paste a batch of questions</h2>
+    <p>Enter shared subject, topic, and class above. Paste all questions below, preview them, then download a JSON question file. This page works without internet.</p>
+    <div class="example"><strong>Paste in this format:</strong><pre>1. Which planet is known as the Red Planet?
+A. Venus
+B. Mars
+C. Jupiter
+D. Mercury
+Answer: B
+
+2. What is 5 × 6?
+A. 11
+B. 25
+C. 30
+D. 56
+Answer: C</pre></div>
+    <label for="bulk-text">Questions to paste<textarea id="bulk-text" rows="14" placeholder="Paste the complete set of questions here..."></textarea></label>
+    <button class="secondary" type="button" id="preview-bulk">Preview questions</button>
+    <button class="primary" type="button" id="download-bulk" disabled>Download preview as JSON</button>
+    <div id="bulk-preview" aria-live="polite"></div>
   </section>
   <section id="questions"></section>
   <section class="card">
@@ -65,7 +90,117 @@
   const template = document.getElementById("question-template");
   const status = document.getElementById("status");
   const fields = ["subject", "topic", "class_name", "difficulty"];
+  const bulkText = document.getElementById("bulk-text");
+  const bulkPreview = document.getElementById("bulk-preview");
+  const downloadBulkButton = document.getElementById("download-bulk");
+  let bulkPayload = null;
   const say = (text) => window.speechSynthesis && speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+  const parseBulkQuestions = (text) => {
+    const parsed = [];
+    let current = null;
+    const finish = () => {
+      if (current) {
+        current.stem = current.stem.trim();
+        ["option_a", "option_b", "option_c", "option_d"].forEach((key) => {
+          current[key] = current[key].trim();
+        });
+        parsed.push(current);
+      }
+    };
+    const lines = text.replace(/\r/g, "").replace(/```[^\n]*\n?/g, "").split("\n");
+    for (const line of lines) {
+      const numbered = line.match(/^\s*(?:(?:question|q)\s*)?(\d+)\s*[.):]\s*(.*)$/i);
+      if (numbered) {
+        finish();
+        current = {
+          stem: numbered[2], option_a: "", option_b: "", option_c: "", option_d: "",
+          correct_option: "", explanation: "", field: "stem", errors: []
+        };
+        continue;
+      }
+      if (!current || !line.trim()) continue;
+      const option = line.match(/^\s*(?:\(([A-D])\)|([A-D])\s*[.):])\s*(.*)$/i);
+      if (option) {
+        current.field = `option_${(option[1] || option[2]).toLowerCase()}`;
+        current[current.field] = option[3];
+        continue;
+      }
+      const answer = line.match(/^\s*(?:(?:correct\s+)?answer|ans|key)\s*[:=-]\s*([A-D])(?:\b|$)/i);
+      if (answer) {
+        current.correct_option = answer[1].toUpperCase();
+        current.field = "";
+        continue;
+      }
+      if (current.field) current[current.field] += `${current[current.field] ? " " : ""}${line.trim()}`;
+    }
+    finish();
+    return parsed;
+  };
+  const addPreviewText = (parent, tag, text, className) => {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    element.textContent = text;
+    parent.appendChild(element);
+    return element;
+  };
+  const invalidateBulkPreview = () => {
+    bulkPayload = null;
+    downloadBulkButton.disabled = true;
+  };
+  const previewBulkQuestions = () => {
+    invalidateBulkPreview();
+    bulkPreview.replaceChildren();
+    const metadata = collect();
+    const errors = [];
+    if (!metadata.subject) errors.push("Enter a subject above.");
+    if (!metadata.topic) errors.push("Enter a topic above.");
+    if (!metadata.class_name) errors.push("Enter a class above.");
+    errors.forEach((message) => addPreviewText(bulkPreview, "p", message, "error"));
+
+    const parsed = parseBulkQuestions(bulkText.value);
+    if (!parsed.length) {
+      addPreviewText(bulkPreview, "p", "No numbered questions found. Start each question with a number, such as “1.”.", "error");
+      return;
+    }
+    parsed.forEach((question, index) => {
+      if (!question.stem) question.errors.push("Question text is missing.");
+      ["a", "b", "c", "d"].forEach((letter) => {
+        if (!question[`option_${letter}`]) question.errors.push(`Option ${letter.toUpperCase()} is missing.`);
+      });
+      if (!question.correct_option) question.errors.push("Correct answer is missing; use “Answer: B”.");
+      const card = document.createElement("article");
+      card.className = "preview-question";
+      addPreviewText(card, "h3", `Question ${index + 1}`);
+      addPreviewText(card, "p", question.stem || "(Question text missing)");
+      const choices = document.createElement("ul");
+      ["a", "b", "c", "d"].forEach((letter) => {
+        addPreviewText(choices, "li", `${letter.toUpperCase()}. ${question[`option_${letter}`] || "(missing)"}`);
+      });
+      card.appendChild(choices);
+      addPreviewText(card, "p", `Correct answer: ${question.correct_option || "Missing"}`);
+      question.errors.forEach((message) => addPreviewText(card, "p", message, "error"));
+      bulkPreview.appendChild(card);
+    });
+
+    const valid = errors.length === 0 && parsed.every((question) => question.errors.length === 0);
+    addPreviewText(
+      bulkPreview,
+      "p",
+      `${parsed.length} question${parsed.length === 1 ? "" : "s"} found. ${valid ? "Review the preview, then download the JSON file." : "Fix the issues above and preview again."}`,
+      valid ? "success" : "error"
+    );
+    if (!valid) return;
+    bulkPayload = {
+      subject: metadata.subject,
+      topic: metadata.topic,
+      class_name: metadata.class_name,
+      difficulty: metadata.difficulty,
+      questions: parsed.map(({stem, option_a, option_b, option_c, option_d, correct_option, explanation}) => ({
+        stem, option_a, option_b, option_c, option_d, correct_option, explanation
+      }))
+    };
+    downloadBulkButton.disabled = false;
+  };
   const addQuestion = (data = {}) => {
     const item = template.content.cloneNode(true);
     item.querySelector(".question-number").textContent = list.children.length + 1;
@@ -109,6 +244,21 @@
   };
   document.getElementById("clear").onclick = () => { if (confirm("Clear all questions?")) { apply({}); setStatus("Form cleared."); } };
   document.getElementById("read-help").onclick = () => say("Fill the subject and class. Write a question and four answers. Choose the right answer. Then save the file.");
+  document.getElementById("preview-bulk").onclick = previewBulkQuestions;
+  downloadBulkButton.onclick = () => {
+    if (!bulkPayload) return;
+    const blob = new Blob([JSON.stringify(bulkPayload, null, 2)], {type: "application/json"});
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = "teacher-questions.json";
+    link.click();
+    URL.revokeObjectURL(link.href);
+    setStatus("Bulk question JSON downloaded. Send this file to your school administrator or import it from Question Bank.");
+  };
+  [bulkText, ...fields.map((id) => document.getElementById(id))].forEach((field) => {
+    field.addEventListener("input", invalidateBulkPreview);
+    field.addEventListener("change", invalidateBulkPreview);
+  });
   addQuestion();
 })();
 </script>

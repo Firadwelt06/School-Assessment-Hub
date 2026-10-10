@@ -727,7 +727,7 @@ meaningfully different, use plausible distractors, and clear age-appropriate wor
 
 
 def save_questions(questions, user_id):
-    for item in questions:
+    for question_number, item in enumerate(questions, start=1):
         execute(
             """INSERT INTO questions
             (subject, topic, class_name, image_path, stem, option_a, option_b, option_c, option_d,
@@ -893,6 +893,7 @@ def dashboard():
         "attempts": query("SELECT COUNT(*) AS count FROM attempts", one=True)["count"],
     }
     subject_filter = request.args.get("subject", "").strip()
+    class_filter = request.args.get("class_name", "").strip()
     exam_type_filter = request.args.get("exam_type", "").strip()
     status_filter = request.args.get("status", "").strip()
     exam_sql = "SELECT e.*, COUNT(eq.question_id) AS question_count FROM exams e LEFT JOIN exam_questions eq ON eq.exam_id=e.id WHERE 1=1"
@@ -907,6 +908,7 @@ def dashboard():
         exam_sql += " AND e.published = ?"
         exam_params.append(int(status_filter == "published"))
     if user["role"] == "student":
+        exam_sql += " AND e.published = 1"
         exam_sql += " AND (e.class_name = '' OR e.class_name = ? OR e.class_name = ?)"
         exam_params.extend([user["class_name"], class_group(user["class_name"])])
     elif user["role"] == "teacher":
@@ -919,6 +921,8 @@ def dashboard():
             exam_params.append(user["id"])
     exam_sql += " GROUP BY e.id ORDER BY e.id DESC"
     exams = query(exam_sql, exam_params)
+    if class_filter:
+        exams = [exam for exam in exams if class_matches(exam["class_name"], class_filter)]
     recent_attempts = []
     if user["role"] in ("admin", "teacher"):
         attempt_sql = """SELECT a.id, a.score, a.total, a.started_at, a.submitted_at,
@@ -941,7 +945,12 @@ def dashboard():
         ]
     subjects = [row["subject"] for row in query("SELECT DISTINCT subject FROM exams ORDER BY subject")]
     classes = class_options()
-    return render_template("dashboard.html", stats=stats, exams=exams, recent_attempts=recent_attempts, user=user, subjects=subjects, classes=classes, subject_filter=subject_filter, status_filter=status_filter, exam_type_filter=exam_type_filter, exam_types=EXAM_TYPES)
+    return render_template(
+        "dashboard.html", stats=stats, exams=exams, recent_attempts=recent_attempts,
+        user=user, subjects=subjects, classes=classes, exam_classes=class_group_options(),
+        subject_filter=subject_filter, class_filter=class_filter,
+        status_filter=status_filter, exam_type_filter=exam_type_filter, exam_types=EXAM_TYPES,
+    )
 
 
 @app.route("/questions", methods=["GET", "POST"])
@@ -1043,26 +1052,28 @@ def offline_question_template():
 @login_required("admin", "teacher")
 def import_offline_questions():
     upload = request.files.get("question_file")
-    if not upload or not upload.filename:
+    pasted_json = request.form.get("question_json", "").strip()
+    if (not upload or not upload.filename) and not pasted_json:
         flash("Choose an exported question file first.", "error")
         return redirect(url_for("questions"))
     try:
-        payload = json.load(upload.stream)
+        payload = json.loads(pasted_json) if pasted_json else json.load(upload.stream)
         questions = payload.get("questions") if isinstance(payload, dict) else payload
         if not isinstance(questions, list) or not questions:
             raise ValueError("The question file does not contain any questions.")
+        metadata = payload if isinstance(payload, dict) else {}
         user = current_user()
-        imported = 0
-        for item in questions:
+        records = []
+        for question_number, item in enumerate(questions, start=1):
             if not isinstance(item, dict):
                 raise ValueError("Every saved question must be an object.")
-            subject = str(item.get("subject", "")).strip()
+            subject = str(item.get("subject", metadata.get("subject", ""))).strip()
             if user["role"] == "teacher" and subject not in teacher_subjects(user):
                 raise ValueError(f"You cannot import questions for {subject or 'an unassigned subject'}.")
             values = (
                 subject,
-                str(item.get("topic", "")).strip(),
-                str(item.get("class_name", "")).strip(),
+                str(item.get("topic", metadata.get("topic", ""))).strip(),
+                str(item.get("class_name", metadata.get("class_name", ""))).strip(),
                 "",
                 str(item.get("stem", "")).strip(),
                 str(item.get("option_a", "")).strip(),
@@ -1070,18 +1081,32 @@ def import_offline_questions():
                 str(item.get("option_c", "")).strip(),
                 str(item.get("option_d", "")).strip(),
                 str(item.get("correct_option", "")).strip().upper(),
-                str(item.get("difficulty", "medium")).strip().lower(),
+                str(item.get("difficulty", metadata.get("difficulty", "medium"))).strip().lower(),
                 str(item.get("explanation", "")).strip(),
                 str(item.get("standard", "")).strip(),
                 user["id"],
                 datetime.now().isoformat(timespec="seconds"),
             )
-            if not all(values[index] for index in (0, 1, 4, 5, 6, 7, 8)):
-                raise ValueError("Each question needs a subject, topic, question, and four answer choices.")
+            required_fields = (
+                ("subject", values[0]),
+                ("topic", values[1]),
+                ("question text", values[4]),
+                ("option A", values[5]),
+                ("option B", values[6]),
+                ("option C", values[7]),
+                ("option D", values[8]),
+            )
+            missing_fields = [label for label, value in required_fields if not value]
+            if missing_fields:
+                raise ValueError(
+                    f"Question {question_number} is missing: {', '.join(missing_fields)}."
+                )
             if values[9] not in {"A", "B", "C", "D"}:
                 raise ValueError("Each question must have a correct answer of A, B, C, or D.")
             if values[10] not in {"easy", "medium", "hard"}:
                 raise ValueError("Difficulty must be Easy, Medium, or Hard.")
+            records.append(values)
+        for values in records:
             execute(
                 """INSERT INTO questions
                 (subject, topic, class_name, image_path, stem, option_a, option_b, option_c, option_d,
@@ -1089,7 +1114,7 @@ def import_offline_questions():
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 values,
             )
-            imported += 1
+        imported = len(records)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
         flash(f"Could not import questions: {error}", "error")
     else:
@@ -1257,6 +1282,8 @@ def publish_exam(exam_id):
     else:
         execute("UPDATE exams SET published = ? WHERE id = ?", (int(not exam["published"]), exam_id))
         flash(f"{exam['title']} is now {'published' if not exam['published'] else 'unpublished'}.", "success")
+    if request.form.get("return_to") == "dashboard":
+        return redirect(url_for("dashboard"))
     return redirect(url_for("admin"))
 
 
@@ -1648,7 +1675,24 @@ def results_csv():
 def admin():
     if request.method == "POST":
         action = request.form["action"]
-        if action == "branding":
+        if action == "admin_password":
+            admin_user = current_user()
+            current_password = request.form.get("current_password", "")
+            new_password = request.form.get("new_password", "")
+            confirm_password = request.form.get("confirm_password", "")
+            if not check_password(current_password, admin_user["password_hash"]):
+                flash("Your current password is incorrect.", "error")
+            elif len(new_password) < 8 or len(new_password) > 128:
+                flash("Your new password must be between 8 and 128 characters.", "error")
+            elif new_password != confirm_password:
+                flash("The new password and confirmation do not match.", "error")
+            else:
+                execute(
+                    "UPDATE users SET password_hash = ? WHERE id = ? AND role = 'admin'",
+                    (hash_password(new_password), admin_user["id"]),
+                )
+                flash("Your administrator password has been changed.", "success")
+        elif action == "branding":
             logo = request.files.get("logo")
             logo_name = school_settings().get("school_logo", "")
             if logo and logo.filename:
@@ -1827,6 +1871,9 @@ def admin():
 
     role_filter = request.args.get("role", "").strip()
     class_filter = request.args.get("class_name", "").strip()
+    exam_subject_filter = request.args.get("exam_subject", "").strip()
+    exam_class_filter = request.args.get("exam_class", "").strip()
+    exam_status_filter = request.args.get("exam_status", "").strip()
     user_sql = "SELECT id, username, full_name, role, class_name, subjects, active FROM users WHERE role != 'admin'"
     user_params = []
     if role_filter in ("teacher", "student"):
@@ -1836,6 +1883,18 @@ def admin():
         user_sql += " AND class_name = ?"
         user_params.append(class_filter)
     user_sql += " ORDER BY id"
+    exam_sql = "SELECT id, title, subject, class_name, exam_type, duration_minutes, published FROM exams WHERE 1=1"
+    exam_params = []
+    if exam_subject_filter:
+        exam_sql += " AND subject = ?"
+        exam_params.append(exam_subject_filter)
+    if exam_status_filter in ("published", "draft"):
+        exam_sql += " AND published = ?"
+        exam_params.append(int(exam_status_filter == "published"))
+    exam_sql += " ORDER BY id DESC"
+    exams = query(exam_sql, exam_params)
+    if exam_class_filter:
+        exams = [exam for exam in exams if class_matches(exam["class_name"], exam_class_filter)]
     attempts = [
         {**dict(attempt), "status": attempt_status(attempt)}
         for attempt in query(
@@ -1851,15 +1910,23 @@ def admin():
         users=query(user_sql, user_params),
         attempts=attempts,
         role_filter=role_filter, class_filter=class_filter,
-        classes=class_options(),
+        exam_subject_filter=exam_subject_filter, exam_class_filter=exam_class_filter,
+        exam_status_filter=exam_status_filter,
+        exam_subjects=[row["subject"] for row in query("SELECT DISTINCT subject FROM exams ORDER BY subject")],
         exam_classes=class_group_options(),
+        exam_class_values=sorted(
+            set(class_options() + class_group_options() + [
+                str(exam["class_name"]) for exam in exams if exam["class_name"]
+            ])
+        ),
+        classes=class_options(),
         managed_subjects=category_values("managed_subjects", "SELECT DISTINCT subject AS value FROM questions ORDER BY subject"),
         managed_classes=class_options(),
         access_codes=[
             {**dict(row), "expired": access_code_is_expired(row["expires_at"])}
             for row in query("SELECT * FROM subject_access_codes ORDER BY id DESC")
         ],
-        exams=query("SELECT id, title, subject, class_name, exam_type, duration_minutes, published FROM exams ORDER BY id DESC"),
+        exams=exams,
         exam_types=EXAM_TYPES,
     )
 

@@ -93,7 +93,9 @@ For other computers on the LAN, open `http://SERVER-IP:5000`. Find the server ad
 
 ## Offline teacher question form
 
-From **Question Bank**, select **Download offline form**. The downloaded `teacher-question-form.html` works without a network connection and saves questions in the browser's local storage. It uses large controls, plain-language instructions, a read-aloud button, and a JSON download. When the teacher is back on the school network, sign in, open **Question Bank**, choose the JSON file under **Import offline questions**, and the questions will be added to the teacher's bank. This is intentionally a multiple-choice template and does not transfer images; images can be added later in the online editor.
+From **Question Bank**, select **Download offline form**. The downloaded `teacher-question-form.html` works without a network connection. It includes a bulk-paste area with preview and JSON download, as well as the original one-question-at-a-time form; the latter can save questions in the browser's local storage. Add the shared subject, topic, class, and difficulty, paste numbered questions with A–D choices and an answer line, preview the parsed questions, and download the JSON file. Send that file to a teacher or administrator, who can import it from **Question Bank → Import offline questions** when connected to the school server. The form uses no online services and does not transfer images; images can be added later in the online editor.
+
+To enter many questions together, use **Paste a batch of questions** in the Question Bank. Add shared subject, topic, class, and difficulty details, then paste numbered questions with A–D options and an answer line such as `Answer: B`. Preview the parsed questions, correct any flagged issues in the pasted text, preview again, and import. The app builds the JSON payload automatically; this works over the school's offline LAN and does not require a spreadsheet.
 
 Demo accounts:
 
@@ -164,13 +166,15 @@ Formula rendering is enabled throughout question creation, editing, exam deliver
 
 ## Administrator safeguards
 
-Administrators can publish/unpublish or permanently remove exams, enable/disable users, and permanently remove non-administrator users. The danger-zone data reset removes application records while retaining the current administrator account. Set a strong `DATA_CLEAR_PASSWORD` environment variable before using it; the development fallback must be replaced.
+Administrators can publish/unpublish exams from the dashboard or Administration, change their own password from Administration, enable/disable users, and permanently remove non-administrator users. The optional legacy JSON question importer is collapsed below the bulk paste tool in Question Bank. The danger-zone data reset removes application records while retaining the current administrator account. Set a strong `DATA_CLEAR_PASSWORD` environment variable before using it; the development fallback must be replaced.
 
 ## Recommended improvements and limitations
 
 For a more professional production release, add administrator approval for self-registration, CSRF protection, scheduled exams, printable PDF report cards, question versioning, audit logs, HTTPS, and automated MySQL backups.
 
-The current LAN design may fail or become unreliable with many simultaneous students, a server outage or lost server power, scanned PDFs without OCR, duplicate names belonging to different people, or users sharing the same device/session. Answer recovery depends on the school server for shared persistence; browser-local drafts are limited to the same browser/device and cannot protect unsynced answers from device or browser-storage loss. Passwordless registration is convenient for supervised testing but is not suitable for an untrusted network without access codes or approval.
+The current LAN design has not been load-tested for 100 simultaneous exam takers. The default Waitress configuration uses 8 request threads, so bursts of logins, answer saves, or submissions can queue; increasing the thread count alone is not a guarantee and should be done only after testing the server hardware and MySQL under expected load. For a 100-device pilot, use a dedicated wired server, MySQL on that server or a reliable wired database host, and enough wired access points for coverage and capacity. Keep all access points on the same LAN and disable client/AP isolation so student devices can reach the server. Reserve the server's LAN address, allow inbound TCP port 5000, and rehearse with the expected number of devices, including simultaneous sign-in and submission. The school should not rely on 100-device suitability until that rehearsal succeeds. A server outage or power loss still interrupts exams; answer recovery depends on shared server persistence, and browser-local drafts are limited to the same browser/device and unsynced data. Passwordless registration is convenient for supervised testing but is not suitable for an untrusted network without access codes or approval.
+
+For a 100-student administration checklist, create student accounts beforehand (CSV import is available), test sign-in on all device types, and publish the exam only when ready. Stagger sign-in if a full simultaneous login saturates the access point, and avoid running other high-bandwidth activity on the exam Wi-Fi.
 
 ## Result reports
 
