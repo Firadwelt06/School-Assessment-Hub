@@ -579,6 +579,19 @@ def normalized_name(value):
     return " ".join(unicodedata.normalize("NFKC", value or "").casefold().split())
 
 
+def format_person_name(value):
+    name = " ".join(unicodedata.normalize("NFKC", value or "").split())
+    if any(character.isdigit() for character in name):
+        raise ValueError("Names cannot contain numbers.")
+    formatted_words = []
+    for word in name.split(" "):
+        if word.isupper() or word.islower():
+            parts = re.split(r"([-'\u2019])", word)
+            word = "".join(part.capitalize() if part not in {"-", "'", "\u2019"} else part for part in parts)
+        formatted_words.append(word)
+    return " ".join(formatted_words)
+
+
 def teacher_username(full_name):
     ascii_name = unicodedata.normalize("NFKD", full_name).encode("ascii", "ignore").decode("ascii").lower()
     base = re.sub(r"[^a-z0-9]+", ".", ascii_name).strip(".") or "teacher"
@@ -831,7 +844,11 @@ def login():
 @app.route("/register/teacher", methods=["GET", "POST"])
 def register_teacher():
     if request.method == "POST":
-        full_name = request.form["full_name"].strip()
+        try:
+            full_name = format_person_name(request.form["full_name"])
+        except ValueError as error:
+            flash(str(error), "error")
+            return render_template("register_teacher.html")
         subjects = request.form["subjects"].strip()
         access_code = request.form["access_code"].strip()
         teacher_password_hash = school_settings().get("teacher_default_password_hash", "")
@@ -855,7 +872,11 @@ def register_teacher():
 def register_student():
     classes = class_arm_options()
     if request.method == "POST":
-        full_name = request.form["full_name"].strip()
+        try:
+            full_name = format_person_name(request.form["full_name"])
+        except ValueError as error:
+            flash(str(error), "error")
+            return render_template("register_student.html", classes=classes)
         class_name = request.form["class_name"].strip()
         access_code = request.form["access_code"].strip()
         if not full_name or class_name not in classes or not valid_access_code(access_code, "student"):
@@ -1106,7 +1127,25 @@ def import_offline_questions():
             if values[10] not in {"easy", "medium", "hard"}:
                 raise ValueError("Difficulty must be Easy, Medium, or Hard.")
             records.append(values)
+
+        def duplicate_key(subject, stem):
+            return normalized_name(subject), normalized_name(stem)
+
+        existing_keys = {
+            duplicate_key(row["subject"], row["stem"])
+            for row in query("SELECT subject, stem FROM questions")
+        }
+        unique_records = []
+        skipped_duplicates = 0
         for values in records:
+            key = duplicate_key(values[0], values[4])
+            if key in existing_keys:
+                skipped_duplicates += 1
+                continue
+            existing_keys.add(key)
+            unique_records.append(values)
+
+        for values in unique_records:
             execute(
                 """INSERT INTO questions
                 (subject, topic, class_name, image_path, stem, option_a, option_b, option_c, option_d,
@@ -1114,11 +1153,15 @@ def import_offline_questions():
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 values,
             )
-        imported = len(records)
+        imported = len(unique_records)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
         flash(f"Could not import questions: {error}", "error")
     else:
-        flash(f"Imported {imported} offline question{'s' if imported != 1 else ''}.", "success")
+        flash(
+            f"Imported {imported} question{'s' if imported != 1 else ''}; "
+            f"skipped {skipped_duplicates} duplicate{'s' if skipped_duplicates != 1 else ''}.",
+            "success",
+        )
     return redirect(url_for("questions"))
 
 
@@ -1187,32 +1230,63 @@ def edit_question(question_id):
         flash("Teachers can edit only questions in their assigned subjects.", "error")
         return redirect(url_for("questions"))
     if request.method == "POST":
+        submitted = {
+            "subject": request.form.get("subject", "").strip(),
+            "topic": request.form.get("topic", "").strip(),
+            "class_name": request.form.get("class_name", "").strip(),
+            "stem": request.form.get("stem", "").strip(),
+            "option_a": request.form.get("option_a", "").strip(),
+            "option_b": request.form.get("option_b", "").strip(),
+            "option_c": request.form.get("option_c", "").strip(),
+            "option_d": request.form.get("option_d", "").strip(),
+            "correct_option": request.form.get("correct_option", "").strip().upper(),
+            "difficulty": request.form.get("difficulty", "").strip().lower(),
+            "explanation": request.form.get("explanation", "").strip(),
+            "standard": request.form.get("standard", "").strip(),
+        }
+        required_fields = (
+            ("subject", submitted["subject"]),
+            ("topic", submitted["topic"]),
+            ("question stem", submitted["stem"]),
+            ("option A", submitted["option_a"]),
+            ("option B", submitted["option_b"]),
+            ("option C", submitted["option_c"]),
+            ("option D", submitted["option_d"]),
+        )
+        missing_fields = [label for label, value in required_fields if not value]
+        if missing_fields:
+            flash(f"Please provide: {', '.join(missing_fields)}.", "error")
+            return render_template("question_edit.html", question={**dict(question), **submitted})
+        user = current_user()
+        if user["role"] == "teacher" and submitted["subject"] not in teacher_subjects(user):
+            flash("You can only save questions for your assigned subjects.", "error")
+            return render_template("question_edit.html", question={**dict(question), **submitted})
+        if submitted["correct_option"] not in {"A", "B", "C", "D"}:
+            flash("Choose a correct option from A, B, C, or D.", "error")
+            return render_template("question_edit.html", question={**dict(question), **submitted})
+        if submitted["difficulty"] not in {"easy", "medium", "hard"}:
+            flash("Choose a valid difficulty.", "error")
+            return render_template("question_edit.html", question={**dict(question), **submitted})
         try:
             uploaded_image = save_question_image(request.files.get("question_image"))
         except ValueError as error:
             flash(str(error), "error")
-            return redirect(url_for("edit_question", question_id=question_id))
+            return render_template("question_edit.html", question={**dict(question), **submitted})
         image_path = uploaded_image or question["image_path"]
         values = (
-            request.form["subject"].strip(), request.form["topic"].strip(),
-            request.form.get("class_name", "").strip(), image_path, request.form["stem"].strip(),
-            request.form["option_a"].strip(),
-            request.form["option_b"].strip(), request.form["option_c"].strip(),
-            request.form["option_d"].strip(), request.form["correct_option"],
-            request.form["difficulty"], request.form["explanation"].strip(),
-            request.form["standard"].strip(),
+            submitted["subject"], submitted["topic"], submitted["class_name"], image_path,
+            submitted["stem"], submitted["option_a"], submitted["option_b"],
+            submitted["option_c"], submitted["option_d"], submitted["correct_option"],
+            submitted["difficulty"], submitted["explanation"], submitted["standard"],
             question_id,
         )
-        if not all(values[:9]):
-            flash("Subject, topic, question, all answers, and correct option are required.", "error")
-        else:
-            execute(
-                """UPDATE questions SET subject=?, topic=?, class_name=?, image_path=?, stem=?, option_a=?, option_b=?,
-                option_c=?, option_d=?, correct_option=?, difficulty=?, explanation=?, standard=? WHERE id=?""",
-                values,
-            )
-            flash("Question updated.", "success")
-            return redirect(url_for("questions"))
+        execute(
+            """UPDATE questions SET subject=?, topic=?, class_name=?, image_path=?, stem=?, option_a=?, option_b=?,
+            option_c=?, option_d=?, correct_option=?, difficulty=?, explanation=?, standard=? WHERE id=?""",
+            values,
+        )
+        flash("Question updated.", "success")
+        return redirect(url_for("questions"))
     return render_template("question_edit.html", question=question)
 
 
@@ -1725,8 +1799,11 @@ def admin():
             try:
                 role = request.form["role"]
                 class_name = request.form.get("class_name", "").strip() if role == "student" else ""
-                execute("INSERT INTO users(username, full_name, password_hash, role, class_name, subjects, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", (request.form["username"], request.form["full_name"], hash_password(request.form["password"]), role, class_name, request.form.get("subjects", "").strip(), datetime.now().isoformat(timespec="seconds")))
+                full_name = format_person_name(request.form["full_name"])
+                execute("INSERT INTO users(username, full_name, password_hash, role, class_name, subjects, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", (request.form["username"].strip(), full_name, hash_password(request.form["password"]), role, class_name, request.form.get("subjects", "").strip(), datetime.now().isoformat(timespec="seconds")))
                 flash("User created.", "success")
+            except ValueError as error:
+                flash(str(error), "error")
             except DBIntegrityError:
                 flash("Username already exists.", "error")
         elif action == "students_csv":
@@ -1739,10 +1816,10 @@ def admin():
                     required = {"full_name", "password", "class_name"}
                     if not required.issubset(frame.columns):
                         raise ValueError("CSV columns must include full_name, password, and class_name. username is optional.")
+                    names = [format_person_name(str(row["full_name"])) for row in frame.to_dict("records")]
                     created = 0
-                    for row in frame.to_dict("records"):
+                    for row, full_name in zip(frame.to_dict("records"), names):
                         username = str(row.get("username", "")).strip()
-                        full_name = str(row["full_name"]).strip()
                         class_name = str(row["class_name"]).strip()
                         existing = find_student_by_name(full_name)
                         if existing:
@@ -1758,7 +1835,9 @@ def admin():
                         )
                         created += 1
                     flash(f"Imported {created} students.", "success")
-                except (ValueError, KeyError, DBIntegrityError) as error:
+                except (ValueError, KeyError) as error:
+                    flash(f"Student CSV import failed: {error}", "error")
+                except DBIntegrityError as error:
                     flash(f"Student CSV import failed: {error}", "error")
         elif action == "teachers_csv":
             upload = request.files.get("teachers_csv")
@@ -1770,9 +1849,9 @@ def admin():
                     required = {"full_name", "password"}
                     if not required.issubset(frame.columns):
                         raise ValueError("Teacher CSV columns must include full_name and password. username and class_name are optional.")
+                    names = [format_person_name(str(row["full_name"])) for row in frame.to_dict("records")]
                     created = 0
-                    for row in frame.to_dict("records"):
-                        full_name = str(row["full_name"]).strip()
+                    for row, full_name in zip(frame.to_dict("records"), names):
                         username = str(row.get("username", "")).strip() or re.sub(r"[^a-z0-9]+", ".", full_name.lower()).strip(".")
                         execute(
                             """INSERT INTO users(username, full_name, password_hash, role, class_name, subjects, created_at)
@@ -1781,7 +1860,9 @@ def admin():
                         )
                         created += 1
                     flash(f"Imported {created} teachers.", "success")
-                except (ValueError, KeyError, DBIntegrityError) as error:
+                except (ValueError, KeyError) as error:
+                    flash(f"Teacher CSV import failed: {error}", "error")
+                except DBIntegrityError as error:
                     flash(f"Teacher CSV import failed: {error}", "error")
         elif action == "exam_settings":
             try:

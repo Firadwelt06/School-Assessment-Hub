@@ -59,6 +59,7 @@ Answer: C</pre></div>
     <button class="primary" type="button" id="download-bulk" disabled>Download preview as JSON</button>
     <p id="bulk-status" aria-live="polite"></p>
     <div id="bulk-preview" aria-live="polite"></div>
+    <button class="primary" type="button" id="download-bulk-bottom" disabled>Download these questions as JSON</button>
   </section>
   <details class="card">
     <summary><strong>Optional: enter questions one at a time</strong></summary>
@@ -99,6 +100,7 @@ Answer: C</pre></div>
   const bulkPreview = document.getElementById("bulk-preview");
   const bulkStatus = document.getElementById("bulk-status");
   const downloadBulkButton = document.getElementById("download-bulk");
+  const downloadBulkButtonBottom = document.getElementById("download-bulk-bottom");
   let bulkPayload = null;
   const say = (text) => window.speechSynthesis && speechSynthesis.speak(new SpeechSynthesisUtterance(text));
   const parseBulkQuestions = (text) => {
@@ -152,6 +154,7 @@ Answer: C</pre></div>
   const invalidateBulkPreview = () => {
     bulkPayload = null;
     downloadBulkButton.disabled = true;
+    downloadBulkButtonBottom.disabled = true;
   };
   const previewBulkQuestions = () => {
     invalidateBulkPreview();
@@ -206,6 +209,7 @@ Answer: C</pre></div>
       }))
     };
     downloadBulkButton.disabled = false;
+    downloadBulkButtonBottom.disabled = false;
   };
   const addQuestion = (data = {}) => {
     const item = template.content.cloneNode(true);
@@ -251,7 +255,7 @@ Answer: C</pre></div>
   document.getElementById("clear").onclick = () => { if (confirm("Clear all questions?")) { apply({}); setStatus("Form cleared."); } };
   document.getElementById("read-help").onclick = () => say("Fill in the subject, topic, and class. Paste all questions using the example format. Preview and fix any issues. Download the JSON file to send back to school.");
   document.getElementById("preview-bulk").onclick = previewBulkQuestions;
-  downloadBulkButton.onclick = () => {
+  const downloadBulkQuestions = () => {
     if (!bulkPayload) return;
     const blob = new Blob([JSON.stringify(bulkPayload, null, 2)], {type: "application/json"});
     const link = document.createElement("a");
@@ -261,6 +265,8 @@ Answer: C</pre></div>
     URL.revokeObjectURL(link.href);
     bulkStatus.textContent = "Bulk question JSON downloaded. Send this file to your school administrator or import it from Question Bank.";
   };
+  downloadBulkButton.addEventListener("click", downloadBulkQuestions);
+  downloadBulkButtonBottom.addEventListener("click", downloadBulkQuestions);
   [bulkText, ...fields.map((id) => document.getElementById(id))].forEach((field) => {
     field.addEventListener("input", invalidateBulkPreview);
     field.addEventListener("change", invalidateBulkPreview);

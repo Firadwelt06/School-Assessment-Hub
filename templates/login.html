@@ -2,17 +2,42 @@
 {% block content %}
 <div class="login-shell">
   <section class="login-card">
-    <div class="eyebrow">SECURE SCHOOL ASSESSMENT</div>
-    <h1>{{ school.school_name }}</h1>
-    <p class="muted">Professional computer-based testing and learning insight.</p>
-    <form method="post">
-      <label>Username<input name="username" autocomplete="username" required></label>
-      <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
-      <button class="button primary wide">Sign in</button>
-    </form>
-    <p class="login-help">Demo: admin/admin123 · teacher/teacher123 · student/student123</p>
-    <p class="login-help"><a href="{{ url_for('register_teacher') }}">Teacher registration</a> · <a href="{{ url_for('register_student') }}">Student registration</a></p>
-    <p class="login-help">On the school network: <strong>http://{{ app_hostname }}:{{ app_port }}</strong></p>
+    <div class="login-brand-panel">
+      <a class="login-brand" href="{{ url_for('login') }}" aria-label="{{ school.school_name }} home">
+        {% if school.school_logo %}<img src="{{ url_for('uploads', filename=school.school_logo) }}" alt="">
+        {% else %}<span class="login-brand-mark" aria-hidden="true">SA</span>{% endif %}
+        <span>{{ school.school_name }}</span>
+      </a>
+      <div class="login-welcome">
+        <div class="eyebrow">SCHOOL ASSESSMENT PORTAL</div>
+        <h1>Learning, assessment, and progress — all in one place.</h1>
+        <p>Sign in to continue to your secure school workspace.</p>
+      </div>
+      <ul class="login-benefits" aria-label="Portal features">
+        <li><span aria-hidden="true">01</span><div><strong>For students</strong><small>Take exams and track your learning.</small></div></li>
+        <li><span aria-hidden="true">02</span><div><strong>For teachers</strong><small>Build assessments and review class progress.</small></div></li>
+        <li><span aria-hidden="true">03</span><div><strong>For administrators</strong><small>Manage school access and assessment activity.</small></div></li>
+      </ul>
+      {% if school.school_address %}<p class="login-school-address">{{ school.school_address }}</p>{% endif %}
+    </div>
+    <div class="login-form-panel">
+      <div class="login-form-heading">
+        <span class="login-form-icon" aria-hidden="true">↗</span>
+        <div><div class="eyebrow">WELCOME BACK</div><h2>Sign in</h2></div>
+      </div>
+      <p class="muted">Enter the account details provided by your school.</p>
+      <form method="post">
+        <label>Username<input name="username" autocomplete="username" placeholder="Your username" required></label>
+        <label>Password<input name="password" type="password" autocomplete="current-password" placeholder="Your password" required></label>
+        <button class="button primary wide">Sign in to your account</button>
+      </form>
+      <div class="login-register">
+        <span>New to the portal?</span>
+        <div><a href="{{ url_for('register_student') }}">Student registration</a><a href="{{ url_for('register_teacher') }}">Teacher registration</a></div>
+      </div>
+      <p class="login-network"><span aria-hidden="true"></span>School network access <strong>http://{{ app_hostname }}:{{ app_port }}</strong></p>
+      <p class="login-footer">If you need help signing in, contact your school administrator.</p>
+    </div>
   </section>
 </div>
 {% endblock %}

@@ -128,7 +128,7 @@ Ready-to-upload examples are included in:
 - `sample_data/students_sample.csv`
 - `sample_data/teachers_sample.csv`
 
-The sample accounts use intentionally simple test passwords and should only be used in a local test environment. Teacher imports require `full_name` and `password`; `username` and `subjects` are optional. Teacher accounts do not use a class/cohort assignment.
+Names entered during registration, manual account creation, and CSV imports have extra whitespace normalized and all-uppercase/all-lowercase words converted to standard capitalization (for example, `ada okafor` becomes `Ada Okafor`). Existing mixed-case name parts are preserved, and names containing digits are rejected. The sample accounts use intentionally simple test passwords and should only be used in a local test environment. Teacher imports require `full_name` and `password`; `username` and `subjects` are optional. Teacher accounts do not use a class/cohort assignment.
 
 ## Student rankings, exam timer, and answer recovery
 

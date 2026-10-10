@@ -37,6 +37,7 @@ Answer: C</pre></div>
   <div class="full question-actions"><button class="button secondary" id="preview-questions" type="button">Preview questions</button><button class="button primary" id="import-pasted-questions" type="submit" disabled>Import questions</button></div>
   <input type="hidden" name="question_json" id="question-json" hidden>
   <div class="full" id="bulk-question-preview" aria-live="polite"></div>
+  <div class="full question-actions"><button class="button primary" id="import-pasted-questions-bottom" type="submit" disabled>Import these questions</button></div>
 </form>
 <details class="admin-details"><summary>Optional: import an existing offline JSON question file</summary><div class="admin-details-content"><p class="muted">Use this only if you already have a JSON file exported from the offline teacher form. For new batches, use the paste-and-preview tool above.</p><form method="post" action="{{ url_for('import_offline_questions') }}" enctype="multipart/form-data" class="offline-import-form"><label for="question-file">Offline question file (JSON)</label><input id="question-file" type="file" name="question_file" accept=".json,application/json" required><button class="button primary">Import JSON questions</button></form></div></details>
 <p class="muted">You can also <a href="{{ url_for('manual_question') }}">use the online editor</a> or <a href="{{ url_for('offline_question_template') }}">download the offline form</a>.</p>
@@ -48,6 +49,7 @@ Answer: C</pre></div>
   const preview = document.getElementById("bulk-question-preview");
   const jsonField = document.getElementById("question-json");
   const importButton = document.getElementById("import-pasted-questions");
+  const importButtonBottom = document.getElementById("import-pasted-questions-bottom");
   const metadataFields = [...form.querySelectorAll('[name="subject"], [name="topic"], [name="class_name"], [name="difficulty"]')];
   let previewReady = false;
 
@@ -56,6 +58,7 @@ Answer: C</pre></div>
     previewReady = false;
     jsonField.value = "";
     importButton.disabled = true;
+    importButtonBottom.disabled = true;
     if (hadPreview) addText(preview, "p", "The pasted text or details changed. Preview again before importing.", "bulk-question-error");
   };
   const startQuestion = (line) => ({
@@ -175,6 +178,7 @@ Answer: C</pre></div>
     jsonField.value = JSON.stringify(payload);
     previewReady = true;
     importButton.disabled = false;
+    importButtonBottom.disabled = false;
   };
 
   document.getElementById("preview-questions").addEventListener("click", showPreview);
