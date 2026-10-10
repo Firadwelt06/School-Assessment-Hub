@@ -605,12 +605,44 @@ def teacher_username(full_name):
 
 def valid_access_code(code, role):
     record = query(
-        "SELECT * FROM subject_access_codes WHERE code = ? AND role = ? AND active = 1 ORDER BY id DESC",
+        "SELECT * FROM subject_access_codes WHERE UPPER(code) = ? AND role = ? AND active = 1 ORDER BY id DESC",
         (code.strip().upper(), role), one=True,
     )
     if not record:
         return False
     return not access_code_is_expired(record["expires_at"])
+
+
+def generate_access_code():
+    adjectives = (
+        "amber", "bright", "calm", "clever", "cool", "crisp", "eager", "gentle",
+        "golden", "happy", "keen", "kind", "lucky", "merry", "mighty", "neat",
+        "noble", "patient", "quick", "quiet", "rapid", "ready", "rustic", "shiny",
+        "silent", "silver", "steady", "sunny", "tidy", "vivid", "warm", "witty",
+        "bold", "brave", "clear", "cosmic", "fuzzy", "grand", "jolly", "lively",
+        "magic", "nimble", "polite", "proud", "smooth", "soft", "stellar", "swift",
+        "tender", "tiny", "urban", "velvet", "wild", "wise", "young", "zesty",
+        "breezy", "cloudy", "daring", "fresh", "helpful", "musical", "playful", "wooden",
+    )
+    nouns = (
+        "badger", "beacon", "bison", "breeze", "canyon", "comet", "coral", "crane",
+        "daisy", "dolphin", "eagle", "falcon", "fern", "finch", "forest", "fox",
+        "galaxy", "garden", "glacier", "harbor", "heron", "island", "jasmine", "lantern",
+        "lemon", "lilac", "maple", "meadow", "meteor", "moon", "otter", "panda",
+        "pebble", "penguin", "phoenix", "piano", "planet", "rabbit", "rainbow", "raven",
+        "river", "robin", "sailor", "sequoia", "shadow", "sparrow", "stream", "spring",
+        "summit", "tiger", "timber", "tulip", "valley", "violet", "willow", "winter",
+        "wizard", "yak", "yonder", "zephyr", "acorn", "anchor", "bluebird", "copper",
+    )
+    suffix_alphabet = "23456789abcdefghjkmnpqrstuvwxyz"
+
+    for _ in range(10):
+        name = f"{secrets.choice(adjectives)}-{secrets.choice(nouns)}"
+        suffix = "".join(secrets.choice(suffix_alphabet) for _ in range(3))
+        code = f"{name}-{suffix}"
+        if not query("SELECT 1 FROM subject_access_codes WHERE UPPER(code) = ?", (code.upper(),), one=True):
+            return code
+    raise RuntimeError("Could not generate a unique access code.")
 
 
 def access_code_is_expired(expires_at):
@@ -1901,7 +1933,7 @@ def admin():
                 duration_hours = float(request.form.get("duration_hours", "24"))
                 if role not in {"teacher", "student"} or duration_hours < 0.5 or duration_hours > 720:
                     raise ValueError
-                code = secrets.token_urlsafe(8).replace("-", "").replace("_", "").upper()[:10]
+                code = generate_access_code()
                 expires_at = datetime.now() + timedelta(hours=duration_hours)
                 execute(
                     "INSERT INTO subject_access_codes(subject, role, code, expires_at, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -1910,6 +1942,8 @@ def admin():
                 flash(f"{role.capitalize()} access code: {code} (expires {expires_at.strftime('%Y-%m-%d %H:%M')}).", "success")
             except ValueError:
                 flash("Choose a role and enter a duration between 0.5 and 720 hours.", "error")
+            except RuntimeError:
+                flash("A unique access code could not be generated. Please try again.", "error")
         elif action == "clear_data":
             if not secrets.compare_digest(request.form.get("clear_password", ""), DATA_CLEAR_PASSWORD):
                 flash("The special data-clear password is incorrect.", "error")
