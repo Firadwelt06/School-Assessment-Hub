@@ -26,9 +26,9 @@
 <main class="wrap">
   <section class="card">
     <h1>Teacher Question Form</h1>
-    <p class="lead">Write questions without internet. Your work is saved on this device.</p>
+    <p class="lead">Paste a batch of questions, preview it, and download a question file without internet.</p>
     <div class="help">
-      <strong>Simple steps:</strong> 1. Fill the subject and class. 2. Write a question and four answers. 3. Choose the right answer. 4. Save the file.
+      <strong>Simple steps:</strong> 1. Fill in the subject, topic, and class. 2. Paste all questions using the example format. 3. Preview and fix any issues. 4. Download the JSON file to send back to school.
       <button class="secondary" type="button" id="read-help">🔊 Read these steps</button>
     </div>
     <div class="grid">
@@ -57,18 +57,23 @@ Answer: C</pre></div>
     <label for="bulk-text">Questions to paste<textarea id="bulk-text" rows="14" placeholder="Paste the complete set of questions here..."></textarea></label>
     <button class="secondary" type="button" id="preview-bulk">Preview questions</button>
     <button class="primary" type="button" id="download-bulk" disabled>Download preview as JSON</button>
+    <p id="bulk-status" aria-live="polite"></p>
     <div id="bulk-preview" aria-live="polite"></div>
   </section>
-  <section id="questions"></section>
-  <section class="card">
-    <button class="secondary" type="button" id="add">➕ Add another question</button>
-    <button class="primary" type="button" id="save">💾 Save questions to this device</button>
-    <button class="primary" type="button" id="download">⬇️ Download question file</button>
-    <button class="secondary" type="button" id="load">📂 Load saved questions</button>
-    <button class="danger" type="button" id="clear">🗑️ Clear this form</button>
-    <p id="status"></p>
-    <p class="small">When you reconnect to the school system, a teacher or administrator can import the downloaded JSON file from the Question Bank.</p>
-  </section>
+  <details class="card">
+    <summary><strong>Optional: enter questions one at a time</strong></summary>
+    <p class="small">Use this older entry method if you prefer filling a separate form for each question. The paste-and-preview method above is quicker for a batch.</p>
+    <section id="questions"></section>
+    <div>
+      <button class="secondary" type="button" id="add">➕ Add another question</button>
+      <button class="primary" type="button" id="save">💾 Save questions to this device</button>
+      <button class="primary" type="button" id="download">⬇️ Download question file</button>
+      <button class="secondary" type="button" id="load">📂 Load saved questions</button>
+      <button class="danger" type="button" id="clear">🗑️ Clear this form</button>
+      <p id="status"></p>
+      <p class="small">When you reconnect to the school system, a teacher or administrator can import the downloaded JSON file from the Question Bank.</p>
+    </div>
+  </details>
 </main>
 <template id="question-template">
   <article class="card question">
@@ -92,6 +97,7 @@ Answer: C</pre></div>
   const fields = ["subject", "topic", "class_name", "difficulty"];
   const bulkText = document.getElementById("bulk-text");
   const bulkPreview = document.getElementById("bulk-preview");
+  const bulkStatus = document.getElementById("bulk-status");
   const downloadBulkButton = document.getElementById("download-bulk");
   let bulkPayload = null;
   const say = (text) => window.speechSynthesis && speechSynthesis.speak(new SpeechSynthesisUtterance(text));
@@ -243,7 +249,7 @@ Answer: C</pre></div>
     if (saved) { apply(JSON.parse(saved)); setStatus("Saved questions loaded."); } else setStatus("There are no saved questions on this device.");
   };
   document.getElementById("clear").onclick = () => { if (confirm("Clear all questions?")) { apply({}); setStatus("Form cleared."); } };
-  document.getElementById("read-help").onclick = () => say("Fill the subject and class. Write a question and four answers. Choose the right answer. Then save the file.");
+  document.getElementById("read-help").onclick = () => say("Fill in the subject, topic, and class. Paste all questions using the example format. Preview and fix any issues. Download the JSON file to send back to school.");
   document.getElementById("preview-bulk").onclick = previewBulkQuestions;
   downloadBulkButton.onclick = () => {
     if (!bulkPayload) return;
@@ -253,7 +259,7 @@ Answer: C</pre></div>
     link.download = "teacher-questions.json";
     link.click();
     URL.revokeObjectURL(link.href);
-    setStatus("Bulk question JSON downloaded. Send this file to your school administrator or import it from Question Bank.");
+    bulkStatus.textContent = "Bulk question JSON downloaded. Send this file to your school administrator or import it from Question Bank.";
   };
   [bulkText, ...fields.map((id) => document.getElementById(id))].forEach((field) => {
     field.addEventListener("input", invalidateBulkPreview);
