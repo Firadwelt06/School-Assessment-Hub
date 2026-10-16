@@ -3,9 +3,9 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from cloud_sync import sync_question_submissions
+from cloud_sync import portal_request, sync_question_submissions
 
 
 REMOTE_ID = "123e4567-e89b-12d3-a456-426614174000"
@@ -40,6 +40,26 @@ class CloudSyncTests(unittest.TestCase):
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def test_portal_requests_send_sync_token_as_bearer_authorization(self):
+        response = MagicMock()
+        response.headers.get_content_type.return_value = "application/json"
+        response.read.return_value = b"{}"
+        urlopen = MagicMock()
+        urlopen.return_value.__enter__.return_value = response
+        token = "private-test-token-value-with-at-least-32-characters"
+
+        with patch.dict(
+            "os.environ",
+            {
+                "CLOUD_PORTAL_URL": "https://portal.example.workers.dev",
+                "CLOUD_PORTAL_SYNC_TOKEN": token,
+            },
+        ), patch("cloud_sync.urllib.request.urlopen", urlopen):
+            portal_request("/api/sync/pending")
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.get_header("Authorization"), f"Bearer {token}")
 
     def submission(self):
         return {
