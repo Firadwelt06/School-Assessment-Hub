@@ -22,6 +22,7 @@ Version 3.0 focuses on exam reliability: students' answers are saved to their at
 - CSV import for teachers and students.
 - Subject, topic, and class metadata on every question.
 - MySQL storage for reliable multi-user school LAN deployment.
+- Optional daily Cloudflare R2 backups of the database and uploaded files, with 30-day retention.
 - Accessibility improvements including keyboard skip navigation, visible focus, screen-reader status announcements, semantic exam answer groups, accessible chart summaries, and reduced-motion support.
 
 ## Run locally
@@ -49,9 +50,27 @@ MYSQL_PASSWORD=replace_with_mysql_password
 HOST=0.0.0.0
 PORT=5000
 WAITRESS_THREADS=8
+CLOUD_BACKUP_ENABLED=0
+CLOUD_BACKUP_HOUR=2
+R2_ACCOUNT_ID=
+R2_ACCESS_KEY_ID=
+R2_SECRET_ACCESS_KEY=
+R2_BUCKET=
+R2_BACKUP_PREFIX=school-assessment/backups
 ```
 
 Restart `python app.py` after changing `.env`; environment variables are read when the process starts. In normal mode, `python app.py` now starts the Waitress production WSGI server. Set `FLASK_DEBUG=1` only for development.
+
+### Cloud database backups (optional)
+
+The application can upload a backup ZIP to a private Cloudflare R2 bucket. It contains a consistent database snapshot and the contents of `uploads`. R2 encrypts objects at rest and protects transfers with TLS. Backups are retained for 30 days; the first upload runs when the application starts, followed by daily uploads at `CLOUD_BACKUP_HOUR` in the server's local time (default `2`, or 2:00 AM).
+
+1. Create a private R2 bucket. Do not enable public access or attach a public custom domain.
+2. Create an R2 API token scoped to this bucket with object read and write permissions. The application needs to list, upload, verify, and delete its own backups.
+3. Copy the account ID, access key ID, and secret access key into `.env` along with the bucket name. Set `CLOUD_BACKUP_ENABLED=1`; keep the credentials private and never commit `.env`.
+4. Restart the application. Check its console output for the first backup's success or any configuration/upload errors. You can run `python cloud_backup.py` to request and verify a backup manually.
+
+The scheduled job runs in the Flask/Waitress process, so backups run only while the application is running. A SQLite archive contains `database/assessment.sqlite3`; a MySQL archive contains `database/assessment.sql`. To restore, stop the app, restore the database snapshot using the matching database engine, restore the archive's `uploads` directory, and restart the app. Test restores periodically. The free R2 allowance is 10 GB-month; if the total size of the retained backups exceeds that amount, storage charges may apply.
 
 Open `http://localhost:5000`. The Flask server binds to `0.0.0.0`, so other staff and students on the same Wi-Fi/LAN can use `http://lahs.local:5000` after the name is configured. The app advertises the name with Zeroconf, but `.local` discovery depends on mDNS support on each client and is not reliable on every Windows installation. For deterministic Windows access, run PowerShell as Administrator on each client:
 

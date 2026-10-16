@@ -2078,11 +2078,16 @@ def uploads(filename):
 init_db()
 
 if __name__ == "__main__":
+    from cloud_backup import start_cloud_backup_scheduler
+
     host = os.getenv("HOST", "0.0.0.0")
     port = APP_PORT
     if os.getenv("FLASK_DEBUG") == "1":
+        if os.getenv("WERKZEUG_RUN_MAIN") == "true":
+            start_cloud_backup_scheduler(DB_ENGINE, DB_PATH, db, UPLOAD_DIR)
         app.run(host=host, port=port, debug=True)
     else:
+        backup_scheduler = start_cloud_backup_scheduler(DB_ENGINE, DB_PATH, db, UPLOAD_DIR)
         from waitress import serve
         zeroconf = None
         service_info = None
@@ -2118,6 +2123,8 @@ if __name__ == "__main__":
         try:
             serve(app, host=host, port=port, threads=int(os.getenv("WAITRESS_THREADS", "8")))
         finally:
+            if backup_scheduler:
+                backup_scheduler.shutdown(wait=True)
             if zeroconf and service_info:
                 zeroconf.unregister_service(service_info)
                 zeroconf.close()
