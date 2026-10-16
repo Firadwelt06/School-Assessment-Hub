@@ -2,21 +2,27 @@
 
 A professional Flask-based local-network CBT platform for schools.
 
+Version 3.0 focuses on exam reliability: students' answers are saved to their attempt, restored after refresh, and finalized against a server-enforced timer.
+
 ## Features
 
 - Role-based sign-in for administrators, teachers, and students.
 - Subject-specific question generation from pasted notes or uploaded PDF/DOCX lesson documents.
 - Gemini API integration with a local fallback when no API key is configured.
+- Temporary Gemini service errors are retried before using local fallback; fallback-generated questions should be reviewed before use.
 - Teacher question bank and exam builder.
 - Branded CBT paper header using the administrator's school name, address, and logo.
 - Student browser-based CBT examination experience.
+- Attempt-scoped answer autosaving, refresh recovery, offline browser drafts, and clear connection/save status.
+- Question navigator with answered/unanswered progress and staff visibility into in-progress and elapsed attempts.
 - Automatic marking with subject and overall student rankings by class.
 - Five administrator-selectable themes or an uploaded image theme.
 - Manual question entry with LaTeX formula support.
 - Administrator-controlled exam rewrite permissions.
 - CSV import for teachers and students.
 - Subject, topic, and class metadata on every question.
-- SQLite storage for a simple school LAN deployment.
+- MySQL storage for reliable multi-user school LAN deployment.
+- Accessibility improvements including keyboard skip navigation, visible focus, screen-reader status announcements, semantic exam answer groups, accessible chart summaries, and reduced-motion support.
 
 ## Run locally
 
@@ -34,12 +40,62 @@ You can alternatively create a `.env` file in the project folder:
 FLASK_SECRET_KEY=replace-with-a-long-random-value
 GEMINI_API_KEY=your-gemini-key
 GEMINI_MODEL=gemini-3.6-flash
-DATABASE_PATH=assessment.db
+DB_ENGINE=mysql
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_DATABASE=school_assessment
+MYSQL_USER=school_app
+MYSQL_PASSWORD=replace_with_mysql_password
+HOST=0.0.0.0
+PORT=5000
+WAITRESS_THREADS=8
 ```
 
-Restart `python app.py` after changing `.env`; environment variables are read when the process starts.
+Restart `python app.py` after changing `.env`; environment variables are read when the process starts. In normal mode, `python app.py` now starts the Waitress production WSGI server. Set `FLASK_DEBUG=1` only for development.
 
-Open `http://localhost:5000`. The Flask server binds to `0.0.0.0`, so other staff and students on the same Wi-Fi/LAN can use the host computer's LAN IP, for example `http://192.168.1.20:5000`. Allow Python/port 5000 through Windows Firewall when prompted. Everyone must be connected to the same private network; guest Wi-Fi isolation can prevent devices from seeing the host.
+Open `http://localhost:5000`. The Flask server binds to `0.0.0.0`, so other staff and students on the same Wi-Fi/LAN can use `http://lahs.local:5000` after the name is configured. The app advertises the name with Zeroconf, but `.local` discovery depends on mDNS support on each client and is not reliable on every Windows installation. For deterministic Windows access, run PowerShell as Administrator on each client:
+
+```powershell
+Start-Process PowerShell -Verb RunAs -ArgumentList '-ExecutionPolicy Bypass -File ".\setup-school-hostname.ps1" -ServerIp 192.168.1.4 -Hostname lahs.local -Wait'
+```
+
+Replace `192.168.1.4` with the server's current IPv4 address. The command opens an elevated PowerShell window because Windows protects the hosts file. Allow Python/port 5000 through Windows Firewall when prompted. This hosts-file method must be run on every Windows client; it does not configure Android or other devices. Everyone must be connected to the same private network; guest Wi-Fi isolation can prevent devices from seeing the host. Change `APP_HOSTNAME` in `.env` to the name the school wants to use. If the router supports local DNS/host records, adding the same hostname there is preferable because it works for all devices and continues to work after the server receives a new IP.
+
+## First-time MySQL setup on Windows
+
+Open MySQL Workbench or the MySQL command line and create the database and application user. Replace the example password with your own strong password:
+
+```sql
+CREATE DATABASE school_assessment CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE OR REPLACE USER 'school_app'@'localhost' IDENTIFIED BY 'replace_with_mysql_password';
+GRANT ALL PRIVILEGES ON school_assessment.* TO 'school_app'@'localhost';
+FLUSH PRIVILEGES;
+```
+
+Copy `.env.example` to `.env`, fill in the MySQL password, and keep `DB_ENGINE=mysql`. On the first start, the application creates its tables automatically:
+
+```powershell
+Copy-Item .env.example .env
+python -m pip install -r requirements.txt
+python app.py
+```
+
+If you already have data in `assessment.db`, stop the application, configure `.env` for MySQL, start it once to create the tables, stop it, and then run:
+
+```powershell
+python migrate_sqlite_to_mysql.py assessment.db
+python app.py
+```
+
+The migration replaces the records in the configured MySQL tables with the records from the SQLite file. Keep the original `assessment.db` as a backup until you have checked users, questions, exams, attempts, reports, and settings.
+
+For other computers on the LAN, open `http://SERVER-IP:5000`. Find the server address with `ipconfig`. The Windows Firewall must allow inbound TCP port 5000.
+
+## Offline teacher question form
+
+From **Question Bank**, select **Download offline form**. The downloaded `teacher-question-form.html` works without a network connection. Its main workflow is the bulk-paste area with preview and JSON download. The older one-question-at-a-time form and its local save/load controls are available in a collapsed optional section. Add shared subject, topic, class, and difficulty, paste numbered questions with A–D choices and an answer line, preview the parsed questions, and download the JSON file. Send that file to a teacher or administrator, who can import it from **Question Bank → Import offline questions** when connected to the school server. The form uses no online services and does not transfer images; images can be added later in the online editor.
+
+To enter many questions together, use **Paste a batch of questions** in the Question Bank. Add shared subject, topic, class, and difficulty details, then paste numbered questions with A–D options and an answer line such as `Answer: B`. Preview the parsed questions, correct any flagged issues in the pasted text, preview again, and import. The app builds the JSON payload automatically; this works over the school's offline LAN and does not require a spreadsheet.
 
 Demo accounts:
 
@@ -63,17 +119,24 @@ bolu, Bolu Yusuf,StudentPass2,SS2 A
 
 `full_name`, `password`, and `class_name` are required. `username` is optional; if omitted, the system creates one from the student's name. Students are grouped by `class_name` for ranking reports.
 
+Administrators can generate separate access codes for teacher and student registration. New codes use a memorable word pair plus a short random suffix, are role-specific, do not depend on subject, and stop working once their configured duration expires. Existing shared access codes are migrated as student codes; generate new teacher codes for teacher registration.
+
+Administrators can configure a shared password for teacher accounts from **Administration**. Setting or changing it resets the password for all existing teachers and applies it to future teacher registrations; student passwords are unaffected. New teachers are shown their sign-in username after registration. Because teachers share this password, distribute it securely and change it promptly if it is exposed.
+
 Ready-to-upload examples are included in:
 
 - `sample_data/students_sample.csv`
 - `sample_data/teachers_sample.csv`
 
-The sample accounts use intentionally simple test passwords and should only be used in a local test environment. Teacher imports require `full_name` and `password`; `username` and `class_name` are optional for teachers.
+Names entered during registration, manual account creation, and CSV imports have extra whitespace normalized and all-uppercase/all-lowercase words converted to standard capitalization (for example, `ada okafor` becomes `Ada Okafor`). Existing mixed-case name parts are preserved, and names containing digits are rejected. The sample accounts use intentionally simple test passwords and should only be used in a local test environment. Teacher imports require `full_name` and `password`; `username` and `subjects` are optional. Teacher accounts do not use a class/cohort assignment.
 
-## Student rankings and exam timer
+## Student rankings, exam timer, and answer recovery
 
-Teachers and administrators can open **Student Rankings** to see subject rankings within each class and overall rankings within each class. The class filter also offers combined cohorts such as `SS1`, which combines `SS1 A`, `SS1 B`, and similar sections. Rankings can be narrowed by subject, exam type, and subject/overall view. Students see a countdown timer during every CBT exam. At five minutes and one minute remaining, the timer changes color and displays a warning. When it reaches zero, the exam is submitted automatically.
-The server also records the start time and rejects submissions after the configured duration. Refreshing the page does not reset the timer.
+Teachers and administrators can open **Student Rankings** to see subject rankings within each class and overall rankings within each class. The class filter also offers combined cohorts such as `SS1`, which combines `SS1 A`, `SS1 B`, and similar sections. Rankings can be narrowed by subject, exam type, and subject/overall view.
+
+During an exam, each answer is saved to that student's active attempt while connected. Refreshing or reopening the exam restores server-saved answers and does not reset the server-recorded timer. If the network drops, the page keeps a local recovery draft in that browser and syncs it after reconnection; the save indicator shows whether changes have reached the server. Students can use the question navigator to jump between questions and see answered/unanswered progress. Teachers and administrators see recent attempt state on their dashboard; elapsed attempts are finalized when the student reconnects or reopens the exam.
+
+The countdown stays visible. At five minutes and one minute remaining, it changes color and displays a warning. The server enforces the configured duration and automatically finalizes saved answers at expiry. A brief network interruption can recover through the browser draft, but a device/browser loss before an offline draft syncs, a server outage, or server power loss still requires the school to restore service and use current database backups.
 
 Administrators can delete teacher and student access from **Administration**. The account is disabled rather than physically removed so historical scores and rankings remain intact.
 
@@ -89,7 +152,9 @@ The manual question editor also supports bulk entry: click **Add another questio
 
 Teachers can be assigned subjects by an administrator or through the teacher registration page. Their question bank, exams, rankings, and CSV reports are limited to those subjects; administrators retain full visibility. Administrators can manage the subject and class categories from the Administration page. Students select a class during registration and only see published exams assigned to that class.
 
-Class categories use two levels: students are assigned to arm classes such as `SS1 A` and `SS1 B`, while teachers and exam/question filters use the general cohort `SS1`. Selecting `SS1` therefore includes both arms. Administrators manage the student arm list, and the application derives the general cohort automatically.
+Clearing the question bank removes only questions that are not already attached to an exam. Questions used by exams are retained so clearing unused content cannot disrupt other teachers or existing exams.
+
+Class categories use two levels: students are assigned to named arms such as `SS1Pearl` and `SS1Coral`, while exam filters can use the general cohort `SS1`. Selecting `SS1` includes both arms. Administrators manage the student arm list, and the application derives the general cohort automatically. Once an administrator has saved a class list, that list is authoritative for registration and setup forms; old student class values no longer add unexpected options.
 
 Teacher and student registration is designed for supervised local-network sessions and does not ask for a password. For an internet-facing deployment, replace this with verified accounts or one-time access codes.
 
@@ -101,13 +166,15 @@ Formula rendering is enabled throughout question creation, editing, exam deliver
 
 ## Administrator safeguards
 
-Administrators can publish/unpublish or permanently remove exams, enable/disable users, and permanently remove non-administrator users. The danger-zone data reset removes application records while retaining the current administrator account. Set a strong `DATA_CLEAR_PASSWORD` environment variable before using it; the development fallback must be replaced.
+Administrators can publish/unpublish exams from the dashboard or Administration, change their own password from Administration, enable/disable users, and permanently remove non-administrator users. The optional legacy JSON question importer is collapsed below the bulk paste tool in Question Bank. The danger-zone data reset removes application records while retaining the current administrator account. Set a strong `DATA_CLEAR_PASSWORD` environment variable before using it; the development fallback must be replaced.
 
 ## Recommended improvements and limitations
 
-For a more professional production release, add administrator approval for self-registration, one-time access codes, CSRF protection, SQLite backups, scheduled exams, printable PDF report cards, question versioning, audit logs, and a proper database server for multiple concurrent users.
+For a more professional production release, add administrator approval for self-registration, CSRF protection, scheduled exams, printable PDF report cards, question versioning, audit logs, HTTPS, and automated MySQL backups.
 
-The current LAN design may fail or become unreliable with many simultaneous students, unstable Wi-Fi, browser refreshes during submission, lost server power, scanned PDFs without OCR, duplicate names belonging to different people, or users sharing the same device/session. Passwordless registration is convenient for supervised testing but is not suitable for an untrusted network without access codes or approval.
+The current LAN design has not been load-tested for 100 simultaneous exam takers. The default Waitress configuration uses 8 request threads, so bursts of logins, answer saves, or submissions can queue; increasing the thread count alone is not a guarantee and should be done only after testing the server hardware and MySQL under expected load. For a 100-device pilot, use a dedicated wired server, MySQL on that server or a reliable wired database host, and enough wired access points for coverage and capacity. Keep all access points on the same LAN and disable client/AP isolation so student devices can reach the server. Reserve the server's LAN address, allow inbound TCP port 5000, and rehearse with the expected number of devices, including simultaneous sign-in and submission. The school should not rely on 100-device suitability until that rehearsal succeeds. A server outage or power loss still interrupts exams; answer recovery depends on shared server persistence, and browser-local drafts are limited to the same browser/device and unsynced data. Passwordless registration is convenient for supervised testing but is not suitable for an untrusted network without access codes or approval.
+
+For a 100-student administration checklist, create student accounts beforehand (CSV import is available), test sign-in on all device types, and publish the exam only when ready. Stagger sign-in if a full simultaneous login saturates the access point, and avoid running other high-bandwidth activity on the exam Wi-Fi.
 
 ## Result reports
 
@@ -155,5 +222,8 @@ Chlorophyll absorbs light energy in the chloroplast...
 Carbon dioxide and water are raw materials...
 ```
 
-If the application reports `local (GEMINI_API_KEY is not set)`, the running Flask process cannot see the environment variable. Set it in the same PowerShell window before running `python app.py`. If it reports `local fallback (Gemini error: ...)`, the key was seen but the Gemini request or response failed; the message now includes the reason.
+If the application reports `local (GEMINI_API_KEY is not set)`, the running Flask process cannot see the environment variable. Set it in the same PowerShell window before running `python app.py`. Temporary Gemini service errors are retried before fallback; if it reports `local fallback after ... Gemini attempt(s)`, review the generated questions before including them in an exam.
 
+## AI acknowledgment and review
+
+The application uses AI-assisted generation to draft questions from teacher-provided lesson notes. AI-generated questions and answers may be inaccurate, incomplete, or unsuitable for a particular class. Teachers should verify the content, answer key, and curriculum alignment before using generated material in an exam; responsibility for the final assessment remains with the school and its educators.
