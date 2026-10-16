@@ -4,3 +4,7 @@ __pycache__/
 .env
 .env
 /uploads
+node_modules/
+teacher_portal/.wrangler/
+teacher_portal/.dev.vars
+teacher_portal/dist/

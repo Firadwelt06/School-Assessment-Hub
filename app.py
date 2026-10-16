@@ -16,6 +16,12 @@ import pandas as pd
 from flask import Flask, flash, jsonify, redirect, render_template, request, send_file, session, url_for
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
+from cloud_sync import (
+    PortalSyncError,
+    reset_portal_teacher_password as send_portal_teacher_password_reset,
+    set_portal_teacher_active as send_portal_teacher_status,
+    sync_question_submissions,
+)
 
 try:
     from google import genai
@@ -260,6 +266,17 @@ def init_mysql_db():
             difficulty VARCHAR(20) NOT NULL DEFAULT 'medium', explanation TEXT, standard TEXT,
             created_by INT NULL, created_at VARCHAR(40) NOT NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+        """CREATE TABLE IF NOT EXISTS question_submissions (
+            id INT PRIMARY KEY AUTO_INCREMENT, remote_id VARCHAR(36) NOT NULL UNIQUE,
+            teacher_name VARCHAR(255) NOT NULL, teacher_username VARCHAR(255) NOT NULL,
+            subject VARCHAR(255) NOT NULL, topic TEXT NOT NULL, class_name VARCHAR(255) NOT NULL DEFAULT '',
+            image_path TEXT NOT NULL, stem TEXT NOT NULL, option_a TEXT NOT NULL, option_b TEXT NOT NULL,
+            option_c TEXT NOT NULL, option_d TEXT NOT NULL, correct_option VARCHAR(10) NOT NULL,
+            difficulty VARCHAR(20) NOT NULL, explanation TEXT NOT NULL, standard TEXT NOT NULL,
+            status ENUM('pending', 'approved', 'rejected') NOT NULL DEFAULT 'pending',
+            feedback TEXT NOT NULL, submitted_at VARCHAR(40) NOT NULL, reviewed_at VARCHAR(40) NOT NULL DEFAULT '',
+            decision_synced TINYINT NOT NULL DEFAULT 0
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
         """CREATE TABLE IF NOT EXISTS exams (
             id INT PRIMARY KEY AUTO_INCREMENT, title VARCHAR(255) NOT NULL,
             subject VARCHAR(255) NOT NULL DEFAULT 'General', class_name VARCHAR(255) NOT NULL DEFAULT '',
@@ -344,6 +361,19 @@ def init_db():
             explanation TEXT, standard TEXT,
             created_by INTEGER, created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS question_submissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, remote_id TEXT NOT NULL UNIQUE,
+            teacher_name TEXT NOT NULL, teacher_username TEXT NOT NULL,
+            subject TEXT NOT NULL, topic TEXT NOT NULL, class_name TEXT NOT NULL DEFAULT '',
+            image_path TEXT NOT NULL DEFAULT '', stem TEXT NOT NULL, option_a TEXT NOT NULL,
+            option_b TEXT NOT NULL, option_c TEXT NOT NULL, option_d TEXT NOT NULL,
+            correct_option TEXT NOT NULL, difficulty TEXT NOT NULL,
+            explanation TEXT NOT NULL DEFAULT '', standard TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')),
+            feedback TEXT NOT NULL DEFAULT '', submitted_at TEXT NOT NULL, reviewed_at TEXT NOT NULL DEFAULT '',
+            decision_synced INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS question_submissions_status_idx ON question_submissions(status, id);
         CREATE TABLE IF NOT EXISTS exams (
             id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
             subject TEXT NOT NULL DEFAULT 'General', class_name TEXT NOT NULL DEFAULT '',
@@ -1957,6 +1987,7 @@ def admin():
                     "DELETE FROM exam_questions",
                     "DELETE FROM exams",
                     "DELETE FROM questions",
+                    "DELETE FROM question_submissions",
                     "DELETE FROM subject_access_codes",
                     "DELETE FROM users WHERE id != ?",
                     "DELETE FROM settings",
@@ -1974,6 +2005,7 @@ def admin():
                         DELETE FROM exam_questions;
                         DELETE FROM exams;
                         DELETE FROM questions;
+                        DELETE FROM question_submissions;
                         DELETE FROM subject_access_codes;
                         DELETE FROM users WHERE id != %d;
                         DELETE FROM settings;
@@ -2056,6 +2088,190 @@ def toggle_access_code(code_id):
         execute("UPDATE subject_access_codes SET active = ? WHERE id = ?", (int(not record["active"]), code_id))
         flash(f"{record['role'].capitalize()} access code {'enabled' if not record['active'] else 'disabled'}.", "success")
     return redirect(url_for("admin"))
+
+
+@app.get("/admin/question-submissions")
+@login_required("admin")
+def admin_question_submissions():
+    status_filter = request.args.get("status", "pending").strip()
+    if status_filter not in {"pending", "approved", "rejected", "all"}:
+        status_filter = "pending"
+    sql = "SELECT * FROM question_submissions"
+    params = []
+    if status_filter != "all":
+        sql += " WHERE status = ?"
+        params.append(status_filter)
+    sql += " ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, id DESC"
+    return render_template(
+        "question_submissions.html",
+        submissions=query(sql, params),
+        status_filter=status_filter,
+        counts={
+            row["status"]: row["count"]
+            for row in query(
+                "SELECT status, COUNT(*) AS count FROM question_submissions GROUP BY status"
+            )
+        },
+        portal_configured=bool(
+            os.getenv("CLOUD_PORTAL_URL", "").strip()
+            and os.getenv("CLOUD_PORTAL_SYNC_TOKEN", "")
+        ),
+    )
+
+
+@app.post("/admin/question-submissions/sync")
+@login_required("admin")
+def sync_admin_question_submissions():
+    try:
+        result = sync_question_submissions(DB_ENGINE, db, UPLOAD_DIR)
+    except PortalSyncError as error:
+        flash(str(error), "error")
+    else:
+        message = (
+            f"Sync complete: downloaded {result['imported']} new question submission(s), "
+            f"sent {result['decisions_synced']} review decision(s)."
+        )
+        if result["conflicts"]:
+            message += f" {len(result['conflicts'])} decision(s) need attention because the portal status changed."
+        flash(message, "warning" if result["conflicts"] else "success")
+    return redirect(url_for("admin_question_submissions"))
+
+
+@app.post("/admin/question-submissions/<int:submission_id>/review")
+@login_required("admin")
+def review_question_submission(submission_id):
+    status = request.form.get("status", "").strip()
+    feedback = request.form.get("feedback", "").strip()
+    if status not in {"approved", "rejected"}:
+        flash("Choose approve or reject for this submission.", "error")
+        return redirect(url_for("admin_question_submissions"))
+    if len(feedback) > 1000:
+        flash("Feedback must be 1,000 characters or fewer.", "error")
+        return redirect(url_for("admin_question_submissions"))
+
+    submission = query(
+        "SELECT * FROM question_submissions WHERE id = ? AND status = 'pending'",
+        (submission_id,),
+        one=True,
+    )
+    if not submission:
+        flash("This submission was not found or has already been reviewed.", "error")
+        return redirect(url_for("admin_question_submissions"))
+
+    if status == "approved":
+        existing_questions = query("SELECT subject, stem FROM questions")
+        if any(
+            normalized_name(row["subject"]) == normalized_name(submission["subject"])
+            and normalized_name(row["stem"]) == normalized_name(submission["stem"])
+            for row in existing_questions
+        ):
+            flash("A matching question already exists in this subject. Reject the submission or review it manually.", "error")
+            return redirect(url_for("admin_question_submissions"))
+
+    connection = db()
+    try:
+        if DB_ENGINE == "mysql":
+            connection.begin()
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT status FROM question_submissions WHERE id = %s FOR UPDATE",
+                    (submission_id,),
+                )
+                current_submission = cursor.fetchone()
+        else:
+            connection.execute("BEGIN IMMEDIATE")
+            current_submission = connection.execute(
+                "SELECT status FROM question_submissions WHERE id = ?",
+                (submission_id,),
+            ).fetchone()
+        if not current_submission or current_submission["status"] != "pending":
+            connection.rollback()
+            flash("This submission was already reviewed.", "error")
+            return redirect(url_for("admin_question_submissions"))
+
+        if status == "approved":
+            execute_on_connection(
+                connection,
+                """INSERT INTO questions
+                (subject, topic, class_name, image_path, stem, option_a, option_b, option_c, option_d,
+                 correct_option, difficulty, explanation, standard, created_by, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    submission["subject"], submission["topic"], submission["class_name"],
+                    submission["image_path"], submission["stem"], submission["option_a"],
+                    submission["option_b"], submission["option_c"], submission["option_d"],
+                    submission["correct_option"], submission["difficulty"],
+                    submission["explanation"], submission["standard"], current_user()["id"],
+                    datetime.now().isoformat(timespec="seconds"),
+                ),
+            )
+        execute_on_connection(
+            connection,
+            """UPDATE question_submissions SET status = ?, feedback = ?, reviewed_at = ?,
+            decision_synced = 0 WHERE id = ?""",
+            (
+                status, feedback, datetime.now().isoformat(timespec="seconds"), submission_id,
+            ),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+    flash(
+        "Question approved and added to the local question bank; it is not published in an exam."
+        if status == "approved"
+        else "Question rejected. The teacher will see your feedback after the next sync.",
+        "success",
+    )
+    return redirect(url_for("admin_question_submissions"))
+
+
+@app.post("/admin/question-submissions/reset-password")
+@login_required("admin")
+def reset_portal_teacher_password():
+    username = request.form.get("username", "").strip().lower()
+    password = request.form.get("password", "")
+    if not re.fullmatch(r"[a-z0-9._-]{3,64}", username):
+        flash("Enter the teacher's portal username (3–64 letters, numbers, dots, underscores, or hyphens).", "error")
+    elif len(password) < 8 or len(password) > 128:
+        flash("Temporary passwords must be 8–128 characters.", "error")
+    else:
+        try:
+            send_portal_teacher_password_reset(username, password)
+        except PortalSyncError as error:
+            flash(str(error), "error")
+        else:
+            flash(
+                f"Password reset for {username}. Share the temporary password privately; "
+                "the teacher should change it after signing in.",
+                "success",
+            )
+    return redirect(url_for("admin_question_submissions"))
+
+
+@app.post("/admin/question-submissions/teacher-access")
+@login_required("admin")
+def update_portal_teacher_access():
+    username = request.form.get("username", "").strip().lower()
+    active = request.form.get("active", "")
+    if not re.fullmatch(r"[a-z0-9._-]{3,64}", username):
+        flash("Enter the teacher's portal username.", "error")
+    elif active not in {"0", "1"}:
+        flash("Choose whether the portal account should be enabled or disabled.", "error")
+    else:
+        try:
+            send_portal_teacher_status(username, active == "1")
+        except PortalSyncError as error:
+            flash(str(error), "error")
+        else:
+            flash(
+                f"Portal account for {username} {'enabled' if active == '1' else 'disabled'}.",
+                "success",
+            )
+    return redirect(url_for("admin_question_submissions"))
 
 
 @app.post("/admin/access-codes/<int:code_id>/delete")

@@ -23,6 +23,7 @@ Version 3.0 focuses on exam reliability: students' answers are saved to their at
 - Subject, topic, and class metadata on every question.
 - MySQL storage for reliable multi-user school LAN deployment.
 - Optional daily Cloudflare R2 backups of the database and uploaded files, with 30-day retention.
+- A separate hosted teacher question portal with manually synced, administrator-reviewed submissions.
 - Accessibility improvements including keyboard skip navigation, visible focus, screen-reader status announcements, semantic exam answer groups, accessible chart summaries, and reduced-motion support.
 
 ## Run locally
@@ -57,6 +58,8 @@ R2_ACCESS_KEY_ID=
 R2_SECRET_ACCESS_KEY=
 R2_BUCKET=
 R2_BACKUP_PREFIX=school-assessment/backups
+CLOUD_PORTAL_URL=
+CLOUD_PORTAL_SYNC_TOKEN=
 ```
 
 Restart `python app.py` after changing `.env`; environment variables are read when the process starts. In normal mode, `python app.py` now starts the Waitress production WSGI server. Set `FLASK_DEBUG=1` only for development.
@@ -71,6 +74,66 @@ The application can upload a backup ZIP to a private Cloudflare R2 bucket. It co
 4. Restart the application. Check its console output for the first backup's success or any configuration/upload errors. You can run `python cloud_backup.py` to request and verify a backup manually.
 
 The scheduled job runs in the Flask/Waitress process, so backups run only while the application is running. A SQLite archive contains `database/assessment.sqlite3`; a MySQL archive contains `database/assessment.sql`. To restore, stop the app, restore the database snapshot using the matching database engine, restore the archive's `uploads` directory, and restart the app. Test restores periodically. The free R2 allowance is 10 GB-month; if the total size of the retained backups exceeds that amount, storage charges may apply.
+
+### Online teacher question portal (Stage 2)
+
+The public teacher portal is a separate Cloudflare Worker with a private D1 database; it never connects to the school's local database. Each school uses its own Worker and D1 database. Teachers create separate portal accounts with a shared school signup code and submit questions (optionally with an image up to 5 MB). The local administrator uses **Administration → Online question submissions → Sync now** to download submissions, review them offline, and later sync decisions. Approval adds a question to the local bank only; the administrator must separately add it to an exam and publish that exam. Rejection feedback appears in the teacher's portal after decisions sync. From the submissions page, a local administrator can reset a portal password or enable/disable an individual portal account; disabling immediately revokes its active sessions.
+
+#### Deploy the portal
+
+Prerequisites: a Cloudflare account with Workers, D1, and R2 available, and Node.js/npm installed on the computer used to deploy. The Worker uses the free Workers/D1 allowances for low-volume pilots; limits and pricing can change, so check [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/) and [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/). Teacher-uploaded images go to a separate private R2 bucket so the portal's image access is isolated from database backups.
+
+1. In the Cloudflare dashboard, open **R2** and create a private bucket named `exam-arena-portal-images` (or another unique name). Keep public access disabled. If you choose another name, update `bucket_name` in `teacher_portal/wrangler.jsonc`.
+2. In PowerShell, install the portal tools and sign in:
+
+   ```powershell
+   cd "E:\Projects (Working on)\Assessment\teacher_portal"
+   npm install
+   npx wrangler login
+   ```
+
+3. Create the portal's private database:
+
+   ```powershell
+   npx wrangler d1 create school-assessment-teacher-portal
+   ```
+
+   Copy the `database_id` from the result into `teacher_portal/wrangler.jsonc`, replacing the all-zero placeholder.
+4. Apply the database schema:
+
+   ```powershell
+   npx wrangler d1 migrations apply school-assessment-teacher-portal --remote
+   ```
+
+5. Generate a long random sync token in PowerShell:
+
+   ```powershell
+   python -c "import secrets; print(secrets.token_urlsafe(48))"
+   ```
+
+   Save it privately; use the exact same value in the next steps and in the local app. Do not send it in chat or commit it.
+6. Set the two Worker secrets. Wrangler prompts for each value; the signup code is shared with teachers, while the sync token must remain private:
+
+   ```powershell
+   npx wrangler secret put SCHOOL_SIGNUP_CODE
+   npx wrangler secret put SYNC_TOKEN
+   ```
+
+   Enter a long, hard-to-guess signup code for `SCHOOL_SIGNUP_CODE`, and the generated sync token for `SYNC_TOKEN`. Keep the signup code private until you share it with teachers.
+7. Deploy:
+
+   ```powershell
+   npm run typecheck
+   npm run deploy
+   ```
+
+   Wrangler prints the public HTTPS `workers.dev` URL. Keep this URL; it is the portal address teachers will use.
+8. In the local app's `.env`, set `CLOUD_PORTAL_URL` to the Worker URL and `CLOUD_PORTAL_SYNC_TOKEN` to the exact sync token from step 5. Restart the local app. The administrator can now open **Administration → Online question submissions** and select **Sync now**.
+9. Give teachers the portal URL and the school signup code. Each teacher registers an individual username and password. Portal passwords are separate from local app passwords; teachers can change them after signing in.
+
+Only perform sync from the local administrator account. The app requires HTTPS for the portal connection and sends the sync token only to the configured URL. If the signup code is exposed, replace the `SCHOOL_SIGNUP_CODE` Worker secret and share the new code only with teachers who need access.
+
+The D1 service stores pending submissions and review status. Images are stored privately in the separate R2 bucket. Cloud free-tier limits apply across usage, and exceeding them can stop requests or create charges depending on the service plan. Keep an independent backup of question submissions if they become business-critical.
 
 Open `http://localhost:5000`. The Flask server binds to `0.0.0.0`, so other staff and students on the same Wi-Fi/LAN can use `http://lahs.local:5000` after the name is configured. The app advertises the name with Zeroconf, but `.local` discovery depends on mDNS support on each client and is not reliable on every Windows installation. For deterministic Windows access, run PowerShell as Administrator on each client:
 

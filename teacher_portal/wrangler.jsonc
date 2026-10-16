@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "school-assessment-teacher-portal",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-15",
+  "workers_dev": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "school-assessment-teacher-portal",
+      "database_id": "85956dd4-a90a-4cf0-a4ab-b121611002a1",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "SUBMISSION_IMAGES",
+      "bucket_name": "exam-arena-portal-images"
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="topbar"><div><div class="eyebrow">TEACHER PORTAL</div><h1>Online question submissions</h1><p class="muted">Sync teacher submissions from the hosted portal, review them offline, and sync your decisions when ready.</p></div></div>
+<p><a href="{{ url_for('admin') }}">Return to Administration</a></p>
+{% if not portal_configured %}
+<section class="panel"><h2>Portal connection not configured</h2><p>Set <code>CLOUD_PORTAL_URL</code> and <code>CLOUD_PORTAL_SYNC_TOKEN</code> in the local <code>.env</code> file after deploying the portal.</p></section>
+{% else %}
+<section class="panel"><div class="section-title"><h2>Manual sync</h2><span class="muted">This is the only action that contacts the online portal</span></div><p>Sync downloads new pending questions and sends any review decisions that have not reached the portal yet. It never publishes an exam.</p><form method="post" action="{{ url_for('sync_admin_question_submissions') }}"><button class="button primary">Sync now</button></form></section>
+{% endif %}
+<section class="panel">
+  <div class="section-title"><h2>Teacher accounts</h2><span class="muted">Reset a portal password when a teacher cannot sign in</span></div>
+  <details class="admin-details"><summary>Reset a teacher's portal password</summary><div class="admin-details-content">
+    <p class="muted">Set a temporary password and share it privately. The teacher can change it after signing in. This changes only the online portal password.</p>
+    <form method="post" action="{{ url_for('reset_portal_teacher_password') }}" class="form-grid">
+      <label>Portal username<input name="username" required minlength="3" maxlength="64" pattern="[A-Za-z0-9._-]+"></label>
+      <label>Temporary password<input name="password" type="password" required minlength="8" maxlength="128" autocomplete="new-password"></label>
+      <div class="full"><button class="button secondary">Reset portal password</button></div>
+    </form>
+  </div></details>
+</section>
+<section class="panel">
+  <div class="section-title"><h2>Manage teacher portal access</h2><span class="muted">Disable one teacher without changing the shared signup code</span></div>
+  <details class="admin-details"><summary>Enable or disable a portal account</summary><div class="admin-details-content">
+    <form method="post" action="{{ url_for('update_portal_teacher_access') }}" class="form-grid" onsubmit="return confirm('Apply this access change to the portal account?');">
+      <label>Portal username<input name="username" required minlength="3" maxlength="64" pattern="[A-Za-z0-9._-]+"></label>
+      <label>Access<select name="active" required><option value="0">Disabled</option><option value="1">Enabled</option></select></label>
+      <div class="full"><button class="button secondary">Update portal access</button></div>
+    </form>
+  </div></details>
+</section>
+<section class="panel">
+  <div class="section-title"><h2>Review queue</h2><span class="muted">{{ counts.get('pending', 0) }} pending · {{ counts.get('approved', 0) }} approved · {{ counts.get('rejected', 0) }} rejected</span></div>
+  <nav class="admin-nav" aria-label="Submission filters">
+    {% for value, label in [('pending', 'Pending'), ('approved', 'Approved'), ('rejected', 'Rejected'), ('all', 'All')] %}
+      <a href="{{ url_for('admin_question_submissions', status=value) }}" {% if status_filter == value %}aria-current="page"{% endif %}>{{ label }}</a>
+    {% endfor %}
+  </nav>
+</section>
+{% for submission in submissions %}
+<section class="panel">
+  <div class="section-title"><h2>{{ submission.subject }} · {{ submission.topic }}</h2><span class="muted">{{ submission.teacher_name }} ({{ submission.teacher_username }})</span></div>
+  <p><strong>Status:</strong> {{ submission.status|capitalize }} · <strong>Submitted:</strong> {{ submission.submitted_at }}</p>
+  <p><strong>Class:</strong> {{ submission.class_name or 'Not specified' }} · <strong>Difficulty:</strong> {{ submission.difficulty|capitalize }}</p>
+  {% if submission.image_path %}<img src="{{ url_for('uploads', filename=submission.image_path) }}" alt="Question image attached by {{ submission.teacher_name }}" style="max-width: min(100%, 520px); max-height: 360px; object-fit: contain">{% endif %}
+  <p><strong>{{ submission.stem }}</strong></p>
+  <ol type="A"><li>{{ submission.option_a }}</li><li>{{ submission.option_b }}</li><li>{{ submission.option_c }}</li><li>{{ submission.option_d }}</li></ol>
+  <p><strong>Correct option:</strong> {{ submission.correct_option }}</p>
+  {% if submission.explanation %}<p><strong>Explanation:</strong> {{ submission.explanation }}</p>{% endif %}
+  {% if submission.standard %}<p><strong>Curriculum standard:</strong> {{ submission.standard }}</p>{% endif %}
+  {% if submission.feedback %}<p class="flash {{ 'error' if submission.status == 'rejected' else 'success' }}"><strong>Feedback:</strong> {{ submission.feedback }}</p>{% endif %}
+  {% if submission.status == 'pending' %}
+  <form method="post" action="{{ url_for('review_question_submission', submission_id=submission.id) }}" class="form-grid">
+    <label class="full">Optional note for the teacher<textarea name="feedback" rows="3" maxlength="1000" placeholder="For a rejection, explain what needs correcting."></textarea></label>
+    <div class="full question-actions"><button class="button primary" name="status" value="approved">Approve into question bank</button><button class="button secondary" name="status" value="rejected">Reject</button></div>
+  </form>
+  {% elif submission.status == 'approved' %}
+  <p class="muted">This question is in the local question bank. It remains unpublished until added to an exam that the administrator publishes.</p>
+  {% endif %}
+</section>
+{% else %}
+<section class="panel"><p class="empty">No submissions in this view.</p></section>
+{% endfor %}
+{% endblock %}
