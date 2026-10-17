@@ -15,6 +15,7 @@ from cloud_sync import (
     portal_request,
     sync_teacher_accounts,
     sync_question_submissions,
+    sync_school_branding,
 )
 
 
@@ -97,6 +98,42 @@ class CloudSyncTests(unittest.TestCase):
 
         request = opener.open.call_args.args[0]
         self.assertEqual(request.get_header("Authorization"), f"Bearer {token}")
+
+    def test_school_branding_sync_sends_local_name_and_logo(self):
+        logo = b"\x89PNG\r\n\x1a\nsmall-logo"
+        (self.uploads_dir / "school-logo.png").write_bytes(logo)
+        with patch("cloud_sync.portal_request", return_value={"ok": True}) as portal_request_mock:
+            school_name = sync_school_branding(
+                {"school_name": "North School", "school_logo": "school-logo.png"},
+                self.uploads_dir,
+            )
+
+        self.assertEqual(school_name, "North School")
+        self.assertEqual(portal_request_mock.call_args.args[0], "/api/sync/branding")
+        payload = portal_request_mock.call_args.kwargs["payload"]
+        self.assertEqual(payload["school_name"], "North School")
+        self.assertEqual(payload["logo_content_type"], "image/png")
+        self.assertEqual(payload["logo_base64"], "iVBORw0KGgpzbWFsbC1sb2dv")
+
+    def test_school_branding_sync_clears_a_removed_logo(self):
+        with patch("cloud_sync.portal_request", return_value={"ok": True}) as portal_request_mock:
+            sync_school_branding(
+                {"school_name": "North School", "school_logo": ""},
+                self.uploads_dir,
+            )
+
+        self.assertEqual(
+            portal_request_mock.call_args.kwargs["payload"],
+            {"school_name": "North School", "logo_content_type": "", "logo_base64": ""},
+        )
+
+    def test_school_branding_sync_rejects_oversized_logo(self):
+        (self.uploads_dir / "school-logo.webp").write_bytes(b"x" * (4 * 1024 * 1024 + 1))
+        with self.assertRaisesRegex(PortalSyncError, "no larger than 4 MB"):
+            sync_school_branding(
+                {"school_name": "North School", "school_logo": "school-logo.webp"},
+                self.uploads_dir,
+            )
 
     def submission(self):
         return {

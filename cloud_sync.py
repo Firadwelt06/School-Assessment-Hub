@@ -1,3 +1,4 @@
+import base64
 import json
 import hashlib
 import os
@@ -18,6 +19,13 @@ IMAGE_TYPES = {
     "image/webp": "webp",
     "image/gif": "gif",
 }
+BRAND_IMAGE_TYPES = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
+}
+BRAND_LOGO_MAX_BYTES = 4 * 1024 * 1024
 
 
 class PortalSyncError(RuntimeError):
@@ -106,6 +114,42 @@ def portal_request(path, method="GET", payload=None, binary=False):
     if not isinstance(response_payload, dict):
         raise PortalSyncError("The teacher portal returned an unexpected response.")
     return response_payload
+
+
+def sync_school_branding(settings, uploads_dir):
+    school_name = str(settings.get("school_name", "")).strip()
+    if not school_name or len(school_name) > 200:
+        raise PortalSyncError("School name must contain 1–200 characters before it can be synced.")
+
+    logo_name = str(settings.get("school_logo", "")).strip()
+    payload = {
+        "school_name": school_name,
+        "logo_content_type": "",
+        "logo_base64": "",
+    }
+    if logo_name:
+        if Path(logo_name).name != logo_name:
+            raise PortalSyncError("The configured school logo filename is invalid.")
+        extension = Path(logo_name).suffix.lower().lstrip(".")
+        content_type = BRAND_IMAGE_TYPES.get(extension)
+        if not content_type:
+            raise PortalSyncError("The school logo must be PNG, JPG, JPEG, or WEBP to sync.")
+        logo_path = Path(uploads_dir) / logo_name
+        try:
+            logo_data = logo_path.read_bytes()
+        except OSError as error:
+            raise PortalSyncError(f"Could not read the configured school logo: {error}.") from error
+        if not logo_data or len(logo_data) > BRAND_LOGO_MAX_BYTES:
+            raise PortalSyncError("The school logo must be non-empty and no larger than 4 MB to sync.")
+        payload.update({
+            "logo_content_type": content_type,
+            "logo_base64": base64.b64encode(logo_data).decode("ascii"),
+        })
+
+    response = portal_request("/api/sync/branding", method="POST", payload=payload)
+    if response.get("ok") is not True:
+        raise PortalSyncError("The teacher portal did not confirm the school branding update.")
+    return school_name
 
 
 def download_submission_image(remote_id, uploads_dir):

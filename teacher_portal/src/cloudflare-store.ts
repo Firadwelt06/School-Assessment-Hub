@@ -2,6 +2,7 @@ import type {
   ImageStore,
   NewSubmission,
   PortalAdmin,
+  PortalBranding,
   PortalStore,
   RateLimitRecord,
   Submission,
@@ -11,6 +12,28 @@ import type {
 
 export class D1PortalStore implements PortalStore {
   constructor(private readonly db: D1Database) {}
+
+  async getBranding(): Promise<PortalBranding> {
+    const rows = await this.db.prepare(
+      "SELECT setting_key, setting_value FROM portal_settings WHERE setting_key IN ('school_name', 'logo_present')",
+    ).all<{ setting_key: string; setting_value: string }>();
+    const values = new Map((rows.results ?? []).map((row) => [row.setting_key, row.setting_value]));
+    return {
+      school_name: values.get("school_name") || "School Assessment Hub",
+      logo_present: values.get("logo_present") === "true",
+    };
+  }
+
+  async saveBranding(branding: PortalBranding) {
+    await this.db.batch([
+      this.db.prepare(
+        "INSERT INTO portal_settings(setting_key, setting_value) VALUES ('school_name', ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value",
+      ).bind(branding.school_name),
+      this.db.prepare(
+        "INSERT INTO portal_settings(setting_key, setting_value) VALUES ('logo_present', ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value",
+      ).bind(String(branding.logo_present)),
+    ]);
+  }
 
   getRateLimit(rateKey: string) {
     return this.db.prepare(

@@ -25,7 +25,7 @@ const portalEnv: PortalEnv = {
   SYNC_TOKEN: process.env.SYNC_TOKEN ?? "",
 };
 
-export async function handler(event: FunctionUrlEvent) {
+export async function handleAwsEvent(event: FunctionUrlEvent, env: PortalEnv) {
   try {
     const headers = new Headers();
     for (const [name, value] of Object.entries(event.headers ?? {})) {
@@ -49,7 +49,7 @@ export async function handler(event: FunctionUrlEvent) {
       headers,
       ...(body && method !== "GET" && method !== "HEAD" ? { body } : {}),
     });
-    const response = await handleRequest(request, portalEnv);
+    const response = await handleRequest(request, env);
     const responseHeaders: Record<string, string> = {};
     response.headers.forEach((value, name) => {
       if (name.toLowerCase() !== "set-cookie") responseHeaders[name] = value;
@@ -76,4 +76,8 @@ export async function handler(event: FunctionUrlEvent) {
       body: JSON.stringify({ error: "The portal could not complete the request. Try again later." }),
     };
   }
+}
+
+export async function handler(event: FunctionUrlEvent) {
+  return handleAwsEvent(event, portalEnv);
 }

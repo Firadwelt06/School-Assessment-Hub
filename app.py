@@ -24,6 +24,7 @@ from cloud_sync import (
     set_portal_teacher_active as send_portal_teacher_status,
     sync_teacher_accounts,
     sync_question_submissions,
+    sync_school_branding,
 )
 
 try:
@@ -2297,6 +2298,7 @@ def sync_admin_question_submissions():
     try:
         teachers = sync_teacher_accounts(DB_ENGINE, db)
         result = sync_question_submissions(DB_ENGINE, db, UPLOAD_DIR)
+        synced_school_name = sync_school_branding(school_settings(), UPLOAD_DIR)
     except PortalSyncError as error:
         flash(str(error), "error")
     else:
@@ -2305,6 +2307,7 @@ def sync_admin_question_submissions():
             f"sent {result['decisions_synced']} review decision(s), "
             f"applied {result['online_reviews_applied']} online review decision(s), "
             f"imported {teachers['imported']} teacher account(s), and updated {teachers['pushed']} online account(s)."
+            f" School branding for {synced_school_name} was synced to the portal."
         )
         if result["online_review_conflicts"]:
             message += f" {result['online_review_conflicts']} online review decision(s) conflict with local decisions."

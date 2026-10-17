@@ -45,6 +45,7 @@ Resources:
           SUBMISSIONS_TABLE: !Ref SubmissionsTable
           RATE_LIMITS_TABLE: !Ref RateLimitsTable
           IMAGE_UPLOADS_TABLE: !Ref ImageUploadsTable
+          SETTINGS_TABLE: !Ref SettingsTable
           SUBMISSION_IMAGES_BUCKET: !Ref SubmissionImages
           SCHOOL_SIGNUP_CODE: ""
           SYNC_TOKEN: ""
@@ -67,6 +68,7 @@ Resources:
                 - !Sub "${SubmissionsTable.Arn}/index/*"
                 - !GetAtt RateLimitsTable.Arn
                 - !GetAtt ImageUploadsTable.Arn
+                - !GetAtt SettingsTable.Arn
             - Effect: Allow
               Action:
                 - s3:GetObject
@@ -186,6 +188,19 @@ Resources:
           AttributeType: S
       KeySchema:
         - AttributeName: image_key
+          KeyType: HASH
+
+  SettingsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: setting_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: setting_key
           KeyType: HASH
 
   SubmissionImages:

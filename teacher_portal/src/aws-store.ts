@@ -22,6 +22,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type {
   ImageStore,
   NewSubmission,
+  PortalBranding,
   PortalStore,
   RateLimitRecord,
   Submission,
@@ -35,6 +36,7 @@ type AwsPortalConfig = {
   submissionsTable: string;
   rateLimitsTable: string;
   imageUploadsTable: string;
+  settingsTable: string;
   imagesBucket: string;
 };
 
@@ -44,6 +46,7 @@ const config: AwsPortalConfig = {
   submissionsTable: requiredEnvironment("SUBMISSIONS_TABLE"),
   rateLimitsTable: requiredEnvironment("RATE_LIMITS_TABLE"),
   imageUploadsTable: requiredEnvironment("IMAGE_UPLOADS_TABLE"),
+  settingsTable: requiredEnvironment("SETTINGS_TABLE"),
   imagesBucket: requiredEnvironment("SUBMISSION_IMAGES_BUCKET"),
 };
 
@@ -67,6 +70,38 @@ function teacherIdKey(teacherId: string) {
 }
 
 export class DynamoPortalStore implements PortalStore {
+  async getBranding(): Promise<PortalBranding> {
+    const [schoolName, logoPresent] = await Promise.all(["school_name", "logo_present"].map((setting_key) =>
+      dynamo.send(new GetCommand({
+        TableName: config.settingsTable,
+        Key: { setting_key },
+        ConsistentRead: true,
+      }))));
+    return {
+      school_name: String(schoolName.Item?.setting_value ?? "School Assessment Hub"),
+      logo_present: logoPresent.Item?.setting_value === "true",
+    };
+  }
+
+  async saveBranding(branding: PortalBranding) {
+    await dynamo.send(new TransactWriteCommand({
+      TransactItems: [
+        {
+          Put: {
+            TableName: config.settingsTable,
+            Item: { setting_key: "school_name", setting_value: branding.school_name },
+          },
+        },
+        {
+          Put: {
+            TableName: config.settingsTable,
+            Item: { setting_key: "logo_present", setting_value: String(branding.logo_present) },
+          },
+        },
+      ],
+    }));
+  }
+
   async deleteExpiredSessions(_now: number) {
     // The sessions table's DynamoDB TTL setting expires these records asynchronously.
   }

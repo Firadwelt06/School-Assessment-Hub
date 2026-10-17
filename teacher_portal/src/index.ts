@@ -1,4 +1,4 @@
-import type { NewSubmission, PortalAdmin, PortalEnv as Env, Submission, Teacher, TeacherAccount } from "./portal-store.js";
+import type { NewSubmission, PortalAdmin, PortalBranding, PortalEnv as Env, Submission, Teacher, TeacherAccount } from "./portal-store.js";
 
 const SESSION_SECONDS = 7 * 24 * 60 * 60;
 const RATE_LIMIT_WINDOW_SECONDS = 15 * 60;
@@ -6,6 +6,13 @@ const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const PASSWORD_ITERATIONS = 100_000;
+const DEFAULT_BRANDING: PortalBranding = {
+  school_name: "School Assessment Hub",
+  logo_present: false,
+};
+const BRAND_LOGO_KEY = "school-branding/logo";
+const BRAND_LOGO_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+const BRAND_LOGO_MAX_BYTES = 4 * 1024 * 1024;
 
 const escapeHtml = (value: unknown) =>
   String(value ?? "").replace(/[&<>"']/g, (character) => ({
@@ -35,16 +42,20 @@ function page(
   imageSource: string | null = null,
   script = "",
   admin?: PortalAdmin,
+  branding: PortalBranding = DEFAULT_BRANDING,
+  portalOrigin = "https://portal.invalid",
 ) {
   const nonce = toBase64Url(crypto.getRandomValues(new Uint8Array(18)));
+  const description = `Online teacher portal for ${branding.school_name}: submit questions for school review.`;
+  const previewImage = branding.logo_present ? `${portalOrigin}/brand/logo` : "";
   const nav = teacher
-    ? `<header><a href="/">School Assessment Hub</a><span>${escapeHtml(teacher.full_name)} · ${escapeHtml(teacher.username)}</span><form method="post" action="/logout"><button>Sign out</button></form></header>`
+    ? `<header><a class="brand" href="/">${branding.logo_present ? '<img src="/brand/logo" alt="">' : ""}${escapeHtml(branding.school_name)}</a><span>${escapeHtml(teacher.full_name)} · ${escapeHtml(teacher.username)}</span><form method="post" action="/logout"><button>Sign out</button></form></header>`
     : admin
-      ? `<header><a href="/admin">School Assessment Hub</a><span>Administrator · ${escapeHtml(admin.full_name)}</span><form method="post" action="/admin/logout"><button>Sign out</button></form></header>`
-    : `<header><a href="/">School Assessment Hub</a><span>Teacher question portal</span></header>`;
+      ? `<header><a class="brand" href="/admin">${branding.logo_present ? '<img src="/brand/logo" alt="">' : ""}${escapeHtml(branding.school_name)}</a><span>Administrator · ${escapeHtml(admin.full_name)}</span><form method="post" action="/admin/logout"><button>Sign out</button></form></header>`
+    : `<header><a class="brand" href="/">${branding.logo_present ? '<img src="/brand/logo" alt="">' : ""}${escapeHtml(branding.school_name)}</a><span>Teacher question portal</span></header>`;
   return new Response(
-    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · School Assessment Hub</title><style>
-      :root{font-family:system-ui,Segoe UI,sans-serif;color:#172b4d;background:#f3f6fa}body{margin:0}header{display:flex;gap:1rem;align-items:center;justify-content:space-between;padding:1rem max(1rem,calc((100% - 960px)/2));background:#102a43;color:#fff}header a{color:#fff;font-weight:700;text-decoration:none}header span{font-size:.9rem}main{max-width:960px;margin:2rem auto;padding:0 1rem}.panel{background:#fff;border:1px solid #d7e0ea;border-radius:12px;padding:1.25rem;margin:1rem 0}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}label{display:block;font-weight:600}label small{display:block;color:#52677d;font-weight:400}input,select,textarea{box-sizing:border-box;width:100%;padding:.7rem;border:1px solid #829ab1;border-radius:6px;margin-top:.35rem;font:inherit}textarea{min-height:6rem}button,.button{display:inline-block;border:0;border-radius:6px;padding:.7rem 1rem;background:#0b65a5;color:white;font:inherit;font-weight:600;text-decoration:none;cursor:pointer}button.secondary{background:#e7eef5;color:#102a43}button.danger{background:#a61b1b}.full{grid-column:1/-1}.notice{padding:.8rem 1rem;background:#e6f4ea;border-radius:6px}.error{background:#fde8e8}.muted{color:#52677d}.status{font-weight:700}.status-pending{color:#8a4b08}.status-approved{color:#16723c}.status-rejected{color:#a61b1b}img.submission-image{display:block;max-width:min(100%,420px);max-height:320px;object-fit:contain;margin:.75rem 0;border:1px solid #d7e0ea}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:.7rem;border-bottom:1px solid #d7e0ea;vertical-align:top}.actions{display:flex;gap:.5rem;flex-wrap:wrap}@media(max-width:640px){header{flex-wrap:wrap}.grid{grid-template-columns:1fr}.full{grid-column:auto}table{display:block;overflow:auto}}
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · ${escapeHtml(branding.school_name)}</title><meta name="description" content="${escapeHtml(description)}"><meta property="og:type" content="website"><meta property="og:title" content="${escapeHtml(branding.school_name)}"><meta property="og:description" content="${escapeHtml(description)}">${previewImage ? `<meta property="og:image" content="${escapeHtml(previewImage)}"><meta property="og:image:secure_url" content="${escapeHtml(previewImage)}"><meta name="twitter:card" content="summary"><meta name="twitter:image" content="${escapeHtml(previewImage)}">` : ""}<style>
+      :root{font-family:system-ui,Segoe UI,sans-serif;color:#172b4d;background:#f3f6fa}body{margin:0}header{display:flex;gap:1rem;align-items:center;justify-content:space-between;padding:1rem max(1rem,calc((100% - 960px)/2));background:#102a43;color:#fff}header a{color:#fff;font-weight:700;text-decoration:none}.brand{display:flex;align-items:center;gap:.6rem}.brand img{width:2rem;height:2rem;object-fit:contain;background:#fff;border-radius:4px}header span{font-size:.9rem}main{max-width:960px;margin:2rem auto;padding:0 1rem}.panel{background:#fff;border:1px solid #d7e0ea;border-radius:12px;padding:1.25rem;margin:1rem 0}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}label{display:block;font-weight:600}label small{display:block;color:#52677d;font-weight:400}input,select,textarea{box-sizing:border-box;width:100%;padding:.7rem;border:1px solid #829ab1;border-radius:6px;margin-top:.35rem;font:inherit}textarea{min-height:6rem}button,.button{display:inline-block;border:0;border-radius:6px;padding:.7rem 1rem;background:#0b65a5;color:white;font:inherit;font-weight:600;text-decoration:none;cursor:pointer}button.secondary{background:#e7eef5;color:#102a43}button.danger{background:#a61b1b}.full{grid-column:1/-1}.notice{padding:.8rem 1rem;background:#e6f4ea;border-radius:6px}.error{background:#fde8e8}.muted{color:#52677d}.status{font-weight:700}.status-pending{color:#8a4b08}.status-approved{color:#16723c}.status-rejected{color:#a61b1b}img.submission-image{display:block;max-width:min(100%,420px);max-height:320px;object-fit:contain;margin:.75rem 0;border:1px solid #d7e0ea}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:.7rem;border-bottom:1px solid #d7e0ea;vertical-align:top}.actions{display:flex;gap:.5rem;flex-wrap:wrap}@media(max-width:640px){header{flex-wrap:wrap}.grid{grid-template-columns:1fr}.full{grid-column:auto}table{display:block;overflow:auto}}
     </style></head><body>${nav}<main>${notice ? `<p class="notice">${escapeHtml(notice)}</p>` : ""}${content}</main>${script ? `<script nonce="${nonce}">${script}</script>` : ""}</body></html>`,
     {
       status: 200,
@@ -230,7 +241,11 @@ async function readJson(request: Request, maxBytes = 64 * 1024) {
   return JSON.parse(body) as Record<string, unknown>;
 }
 
-function loginPage(notice = "", success = false) {
+function requestPortalOrigin(request: Request) {
+  return `https://${new URL(request.url).host}`;
+}
+
+function loginPage(notice = "", success = false, branding = DEFAULT_BRANDING, portalOrigin = "https://portal.invalid") {
   const noticeBlock = notice
     ? `<p class="notice ${success ? "" : "error"}">${escapeHtml(notice)}</p>`
     : "";
@@ -240,10 +255,11 @@ function loginPage(notice = "", success = false) {
     <form method="post" action="/login" class="grid"><label class="full">Username<input name="username" autocomplete="username" required maxlength="64"></label>
     <label class="full">Password<input name="password" type="password" autocomplete="current-password" required maxlength="128"></label>
     <div class="full"><button>Sign in</button></div></form><p>New here? <a href="/register">Create a teacher account</a> with your school's signup code.</p></section>`,
+    undefined, "", null, "", undefined, branding, portalOrigin,
   );
 }
 
-function registerPage(error = "") {
+function registerPage(error = "", branding = DEFAULT_BRANDING, portalOrigin = "https://portal.invalid") {
   const errorNotice = error ? `<p class="notice error">${escapeHtml(error)}</p>` : "";
   return page(
     "Create teacher account",
@@ -253,6 +269,7 @@ function registerPage(error = "") {
     <label class="full">School signup code<input name="signup_code" type="password" autocomplete="off" required maxlength="128"></label>
     <label class="full">Password<input name="password" type="password" autocomplete="new-password" required minlength="8" maxlength="128"><small>Use at least 8 characters. Password reset is handled by your school administrator.</small></label>
     <div class="full"><button>Create account</button></div></form><p>Already registered? <a href="/login">Sign in</a>.</p></section>`,
+    undefined, "", null, "", undefined, branding, portalOrigin,
   );
 }
 
@@ -401,6 +418,8 @@ function dashboardPage(
   submissions: Submission[],
   notice = "",
   imageSource: string | null = null,
+  branding = DEFAULT_BRANDING,
+  portalOrigin = "https://portal.invalid",
 ) {
   const directImageUpload = `(() => {
     const form = document.querySelector('form[action="/submit"]');
@@ -487,10 +506,13 @@ function dashboardPage(
     notice,
     imageSource,
     `${directImageUpload}${batchSubmissionScript}`,
+    undefined,
+    branding,
+    portalOrigin,
   );
 }
 
-function adminLoginPage(notice = "") {
+function adminLoginPage(notice = "", branding = DEFAULT_BRANDING, portalOrigin = "https://portal.invalid") {
   return page(
     "Portal administrator sign in",
     `<h1>Administrator sign in</h1><section class="panel">
@@ -502,6 +524,11 @@ function adminLoginPage(notice = "") {
     </section>`,
     undefined,
     notice,
+    null,
+    "",
+    undefined,
+    branding,
+    portalOrigin,
   );
 }
 
@@ -511,6 +538,8 @@ function portalAdminPage(
   status: Submission["status"] | "all",
   notice = "",
   imageSource: string | null = null,
+  branding = DEFAULT_BRANDING,
+  portalOrigin = "https://portal.invalid",
 ) {
   const filters = [
     ["pending", "Pending"],
@@ -539,14 +568,16 @@ function portalAdminPage(
         <div class="full actions"><button name="status" value="approved">Approve</button><button class="secondary" name="status" value="rejected">Reject</button></div>
       </form>` : ""}
     </section>`).join("") : `<section class="panel"><p>No submissions in this view.</p></section>`}`;
-  return page("Online submission review", content, undefined, notice, imageSource, "", admin);
+  return page("Online submission review", content, undefined, notice, imageSource, "", admin, branding, portalOrigin);
 }
 
 async function login(request: Request, env: Env) {
-  if (!validOrigin(request)) return loginPage("The sign-in request could not be verified.");
+  const branding = await env.store.getBranding();
+  const portalOrigin = requestPortalOrigin(request);
+  if (!validOrigin(request)) return loginPage("The sign-in request could not be verified.", false, branding, portalOrigin);
   const rateState = await rateLimitState(env, request, "login");
   if (rateState.limited) {
-    return loginPage("Too many sign-in attempts. Please wait 15 minutes and try again.");
+    return loginPage("Too many sign-in attempts. Please wait 15 minutes and try again.", false, branding, portalOrigin);
   }
   const form = await request.formData();
   const username = normalizeUsername(text(form, "username"));
@@ -554,7 +585,7 @@ async function login(request: Request, env: Env) {
   const teacher = await env.store.findTeacherForLogin(username);
   if (!teacher || password.length > 128 || !await verifyPassword(password, teacher.password_hash)) {
     await recordRateLimitedAttempt(env, rateState);
-    return loginPage("Username or password is incorrect.");
+    return loginPage("Username or password is incorrect.", false, branding, portalOrigin);
   }
   const sessionToken = toBase64Url(crypto.getRandomValues(new Uint8Array(32)));
   const expiresAt = Math.floor(Date.now() / 1000) + SESSION_SECONDS;
@@ -570,16 +601,18 @@ async function login(request: Request, env: Env) {
 }
 
 async function loginAdmin(request: Request, env: Env) {
-  if (!validOrigin(request)) return adminLoginPage("The sign-in request could not be verified.");
+  const branding = await env.store.getBranding();
+  const portalOrigin = requestPortalOrigin(request);
+  if (!validOrigin(request)) return adminLoginPage("The sign-in request could not be verified.", branding, portalOrigin);
   const rateState = await rateLimitState(env, request, "admin-login");
-  if (rateState.limited) return adminLoginPage("Too many sign-in attempts. Wait 15 minutes and try again.");
+  if (rateState.limited) return adminLoginPage("Too many sign-in attempts. Wait 15 minutes and try again.", branding, portalOrigin);
   const form = await request.formData();
   const username = normalizeUsername(text(form, "username"));
   const password = formValue(form, "password");
   const admin = await env.store.findAdminForLogin(username);
   if (!admin || password.length > 128 || !await verifyPassword(password, admin.password_hash)) {
     await recordRateLimitedAttempt(env, rateState);
-    return adminLoginPage("Username or password is incorrect.");
+    return adminLoginPage("Username or password is incorrect.", branding, portalOrigin);
   }
   const token = toBase64Url(crypto.getRandomValues(new Uint8Array(32)));
   await env.store.createAdminSession({
@@ -593,10 +626,12 @@ async function loginAdmin(request: Request, env: Env) {
 }
 
 async function register(request: Request, env: Env) {
-  if (!validOrigin(request)) return registerPage("The registration request could not be verified.");
+  const branding = await env.store.getBranding();
+  const portalOrigin = requestPortalOrigin(request);
+  if (!validOrigin(request)) return registerPage("The registration request could not be verified.", branding, portalOrigin);
   const rateState = await rateLimitState(env, request, "register");
   if (rateState.limited) {
-    return registerPage("Too many account attempts. Please wait 15 minutes and try again.");
+    return registerPage("Too many account attempts. Please wait 15 minutes and try again.", branding, portalOrigin);
   }
   const form = await request.formData();
   const username = normalizeUsername(text(form, "username"));
@@ -605,19 +640,19 @@ async function register(request: Request, env: Env) {
   const code = formValue(form, "signup_code");
   if (!env.SCHOOL_SIGNUP_CODE || !await sameSecret(env.SCHOOL_SIGNUP_CODE, code)) {
     await recordRateLimitedAttempt(env, rateState);
-    return registerPage("The school signup code is not valid.");
+    return registerPage("The school signup code is not valid.", branding, portalOrigin);
   }
   if (!/^[a-z0-9._-]{3,64}$/.test(username)) {
     await recordRateLimitedAttempt(env, rateState);
-    return registerPage("Use 3–64 letters, numbers, dots, underscores, or hyphens for your username.");
+    return registerPage("Use 3–64 letters, numbers, dots, underscores, or hyphens for your username.", branding, portalOrigin);
   }
   if (fullName.length < 2 || fullName.length > 100) {
     await recordRateLimitedAttempt(env, rateState);
-    return registerPage("Enter a name between 2 and 100 characters.");
+    return registerPage("Enter a name between 2 and 100 characters.", branding, portalOrigin);
   }
   if (password.length < 8 || password.length > 128) {
     await recordRateLimitedAttempt(env, rateState);
-    return registerPage("Choose a password between 8 and 128 characters.");
+    return registerPage("Choose a password between 8 and 128 characters.", branding, portalOrigin);
   }
   const created = await env.store.createTeacher({
     id: username,
@@ -626,11 +661,13 @@ async function register(request: Request, env: Env) {
     password_hash: await hashPassword(password),
     created_at: new Date().toISOString(),
   });
-  if (!created) return registerPage("That username is already in use. Choose another one.");
-  return loginPage("Your teacher account was created. Sign in to submit questions.", true);
+  if (!created) return registerPage("That username is already in use. Choose another one.", branding, portalOrigin);
+  return loginPage("Your teacher account was created. Sign in to submit questions.", true, branding, portalOrigin);
 }
 
 async function submitQuestion(request: Request, env: Env, teacher: Teacher) {
+  const branding = await env.store.getBranding();
+  const portalOrigin = requestPortalOrigin(request);
   if (!validOrigin(request)) return json({ error: "The submission request could not be verified." }, 403);
   const contentLength = Number(request.headers.get("Content-Length") ?? 0);
   if (contentLength > IMAGE_MAX_BYTES + 128 * 1024) {
@@ -639,10 +676,12 @@ async function submitQuestion(request: Request, env: Env, teacher: Teacher) {
       await ownSubmissions(env, teacher.id),
       "Submission exceeds the 5 MB image limit.",
       env.images.getAllowedImageSource(),
+      branding,
+      portalOrigin,
     );
   }
   const showError = async (message: string) =>
-    dashboardPage(teacher, await ownSubmissions(env, teacher.id), message, env.images.getAllowedImageSource());
+    dashboardPage(teacher, await ownSubmissions(env, teacher.id), message, env.images.getAllowedImageSource(), branding, portalOrigin);
   const form = await request.formData();
   const submission = {
     subject: text(form, "subject"),
@@ -759,14 +798,16 @@ function validImageSignature(data: Uint8Array, mime: string) {
 }
 
 async function changePassword(request: Request, env: Env, teacher: Teacher) {
-  if (!validOrigin(request)) return loginPage("The password-change request could not be verified.");
+  const branding = await env.store.getBranding();
+  const portalOrigin = requestPortalOrigin(request);
+  if (!validOrigin(request)) return loginPage("The password-change request could not be verified.", false, branding, portalOrigin);
   const form = await request.formData();
   const currentPassword = formValue(form, "current_password");
   const newPassword = formValue(form, "new_password");
   const account = await env.store.getTeacherPassword(teacher.id);
   if (!account || !await verifyPassword(currentPassword, account.password_hash)) {
     const submissions = await ownSubmissions(env, teacher.id);
-    return dashboardPage(teacher, submissions, "Current password is incorrect.", env.images.getAllowedImageSource());
+    return dashboardPage(teacher, submissions, "Current password is incorrect.", env.images.getAllowedImageSource(), branding, portalOrigin);
   }
   if (newPassword.length < 8 || newPassword.length > 128) {
     const submissions = await ownSubmissions(env, teacher.id);
@@ -775,6 +816,8 @@ async function changePassword(request: Request, env: Env, teacher: Teacher) {
       submissions,
       "New password must be between 8 and 128 characters.",
       env.images.getAllowedImageSource(),
+      branding,
+      portalOrigin,
     );
   }
   await env.store.updateTeacherPassword(teacher.id, await hashPassword(newPassword));
@@ -860,6 +903,68 @@ async function syncTeacherAccounts(request: Request, env: Env) {
   return json({ teachers: await env.store.listTeacherAccounts() });
 }
 
+async function syncBranding(request: Request, env: Env) {
+  if (!await requireSyncToken(request, env)) return json({ error: "Unauthorized." }, 401);
+  let body: Record<string, unknown>;
+  try {
+    body = await readJson(request, 7 * 1024 * 1024);
+  } catch {
+    return json({ error: "Invalid or oversized school branding request." }, 400);
+  }
+  const schoolName = typeof body.school_name === "string" ? body.school_name.trim() : "";
+  if (typeof body.logo_content_type !== "string" || typeof body.logo_base64 !== "string") {
+    return json({ error: "School name and logo fields are required." }, 400);
+  }
+  const contentType = body.logo_content_type;
+  const encodedLogo = body.logo_base64;
+  if (!schoolName || schoolName.length > 200) {
+    return json({ error: "School name must contain 1–200 characters." }, 400);
+  }
+
+  let logo: Uint8Array | null = null;
+  if (encodedLogo) {
+    if (!BRAND_LOGO_TYPES.has(contentType) || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encodedLogo)) {
+      return json({ error: "School logo must be a PNG, JPG, or WEBP image." }, 400);
+    }
+    try {
+      const decoded = atob(encodedLogo);
+      if (!decoded.length || decoded.length > BRAND_LOGO_MAX_BYTES) {
+        return json({ error: "School logo must be no larger than 4 MB." }, 400);
+      }
+      logo = Uint8Array.from(decoded, (character) => character.charCodeAt(0));
+    } catch {
+      return json({ error: "School logo data is invalid." }, 400);
+    }
+    if (!validImageSignature(logo, contentType)) {
+      return json({ error: "School logo data does not match its image type." }, 400);
+    }
+  } else if (contentType) {
+    return json({ error: "A logo image is required when a logo type is provided." }, 400);
+  }
+
+  if (logo) {
+    await env.images.put(BRAND_LOGO_KEY, logo, contentType);
+  } else {
+    await env.images.delete(BRAND_LOGO_KEY);
+  }
+  await env.store.saveBranding({ school_name: schoolName, logo_present: Boolean(logo) });
+  return json({ ok: true });
+}
+
+async function serveBrandLogo(env: Env) {
+  const branding = await env.store.getBranding();
+  if (!branding.logo_present) return new Response("Not found", { status: 404 });
+  const logo = await env.images.get(BRAND_LOGO_KEY);
+  if (!logo || !BRAND_LOGO_TYPES.has(logo.contentType)) return new Response("Not found", { status: 404 });
+  return new Response(new Uint8Array(logo.data), {
+    headers: {
+      "Content-Type": logo.contentType,
+      "Cache-Control": "public, max-age=60",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+}
+
 async function syncTeacherAccount(request: Request, env: Env) {
   if (!await requireSyncToken(request, env)) return json({ error: "Unauthorized." }, 401);
   let body: Record<string, unknown>;
@@ -908,12 +1013,14 @@ async function setPortalAdmin(request: Request, env: Env) {
 }
 
 async function reviewPortalSubmission(request: Request, env: Env, admin: PortalAdmin, id: string) {
-  if (!validOrigin(request)) return portalAdminPage(admin, [], "pending", "The review request could not be verified.");
+  const branding = await env.store.getBranding();
+  const portalOrigin = requestPortalOrigin(request);
+  if (!validOrigin(request)) return portalAdminPage(admin, [], "pending", "The review request could not be verified.", null, branding, portalOrigin);
   const form = await request.formData();
   const status = text(form, "status");
   const feedback = text(form, "feedback").trim();
   if (!UUID_PATTERN.test(id) || !["approved", "rejected"].includes(status) || feedback.length > 1000) {
-    return portalAdminPage(admin, [], "pending", "The review choice or feedback is invalid.");
+    return portalAdminPage(admin, [], "pending", "The review choice or feedback is invalid.", null, branding, portalOrigin);
   }
   const outcome = await env.store.applyDecision(
     id,
@@ -1118,8 +1225,13 @@ async function router(request: Request, env: Env): Promise<Response> {
   const path = url.pathname;
   const method = request.method.toUpperCase();
 
-  if (method === "GET" && path === "/login") return loginPage(url.searchParams.get("notice") ?? "");
-  if (method === "GET" && path === "/register") return registerPage();
+  if (method === "GET" && path === "/brand/logo") return serveBrandLogo(env);
+  if (method === "GET" && path === "/login") {
+    return loginPage(url.searchParams.get("notice") ?? "", false, await env.store.getBranding(), requestPortalOrigin(request));
+  }
+  if (method === "GET" && path === "/register") {
+    return registerPage("", await env.store.getBranding(), requestPortalOrigin(request));
+  }
   if (method === "GET" && path === "/batch-template.json") {
     return new Response(JSON.stringify({
       subject: "Mathematics",
@@ -1146,7 +1258,9 @@ async function router(request: Request, env: Env): Promise<Response> {
   }
   if (method === "POST" && path === "/login") return login(request, env);
   if (method === "POST" && path === "/register") return register(request, env);
-  if (method === "GET" && path === "/admin/login") return adminLoginPage(url.searchParams.get("notice") ?? "");
+  if (method === "GET" && path === "/admin/login") {
+    return adminLoginPage(url.searchParams.get("notice") ?? "", await env.store.getBranding(), requestPortalOrigin(request));
+  }
   if (method === "POST" && path === "/admin/login") return loginAdmin(request, env);
   if (method === "POST" && path === "/api/image-upload") return prepareImageUpload(request, env);
   if (method === "POST" && path === "/api/batch-submissions") return submitBatch(request, env);
@@ -1163,6 +1277,7 @@ async function router(request: Request, env: Env): Promise<Response> {
     if (method === "GET" && path === "/api/sync/pending") return syncPending(request, env);
     if (method === "GET" && path === "/api/sync/reviewed") return syncReviewed(request, env);
     if (method === "GET" && path === "/api/sync/teachers") return syncTeacherAccounts(request, env);
+    if (method === "POST" && path === "/api/sync/branding") return syncBranding(request, env);
     if (method === "POST" && path === "/api/sync/teachers/upsert") return syncTeacherAccount(request, env);
     if (method === "POST" && path === "/api/sync/admin/set-password") return setPortalAdmin(request, env);
     if (method === "POST" && path === "/api/sync/decisions") return syncDecisions(request, env);
@@ -1197,6 +1312,8 @@ async function router(request: Request, env: Env): Promise<Response> {
         status,
         url.searchParams.get("notice") ?? "",
         env.images.getAllowedImageSource(),
+        await env.store.getBranding(),
+        requestPortalOrigin(request),
       );
     }
     const imageMatch = path.match(/^\/admin\/submissions\/([0-9a-fA-F-]{36})\/image$/);
@@ -1211,10 +1328,11 @@ async function router(request: Request, env: Env): Promise<Response> {
 
   const teacher = await getTeacher(request, env);
   if (path === "/") {
-    if (!teacher) return redirect("/login");
+    const branding = await env.store.getBranding();
+    if (!teacher) return loginPage(url.searchParams.get("notice") ?? "", true, branding, requestPortalOrigin(request));
     const submissions = await ownSubmissions(env, teacher.id);
     const notice = url.searchParams.get("notice") ?? "";
-    return dashboardPage(teacher, submissions, notice, env.images.getAllowedImageSource());
+    return dashboardPage(teacher, submissions, notice, env.images.getAllowedImageSource(), branding, requestPortalOrigin(request));
   }
   if (method === "POST" && path === "/submit") {
     if (!teacher) return redirect("/login");

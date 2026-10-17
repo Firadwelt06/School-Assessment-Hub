@@ -9,6 +9,11 @@ export interface PortalAdmin {
   full_name: string;
 }
 
+export interface PortalBranding {
+  school_name: string;
+  logo_present: boolean;
+}
+
 export interface TeacherAccount {
   username: string;
   full_name: string;
@@ -69,6 +74,8 @@ export interface RateLimitRecord {
 }
 
 export interface PortalStore {
+  getBranding(): Promise<PortalBranding>;
+  saveBranding(branding: PortalBranding): Promise<void>;
   getRateLimit(rateKey: string): Promise<RateLimitRecord | null>;
   recordRateLimitedAttempt(rateKey: string, now: number): Promise<void>;
   findTeacherForSession(tokenHash: string, now: number): Promise<Teacher | null>;

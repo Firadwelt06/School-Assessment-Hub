@@ -156,6 +156,8 @@ The school administrator may review questions at the hosted portal's `/admin/log
 
 Online teacher accounts are synchronized with local teacher accounts during manual sync. A teacher created on either side can use the same username and password on both after syncing. Password changes and disabled-account status are synchronized too. If both copies have changed since their last successful sync, the app flags a conflict; an administrator must select **Keep local** or **Keep online** in the local submission/sync page. Newly imported online teachers have no local subject or class assignments: an administrator must assign both locally before they can access student results. Class assignments remain on the school server.
 
+The school name and logo configured in local **Administration → School setup** are sent to the portal on **Online question submissions → Sync now**. The portal uses the synced name in its header and link-preview title/description. Its preview logo is available at one HTTPS portal image route; the underlying S3/R2 bucket remains private. Logos must be PNG, JPG, or WEBP and no larger than 4 MB to sync.
+
 Exam results and student data are never uploaded to the hosted portal. Teachers can view results only on the school LAN and only for both their assigned subjects and explicitly assigned classes. The online portal stores teacher accounts and question submissions, not student results.
 
 #### Deploy a fresh AWS portal
@@ -227,6 +229,7 @@ Prerequisites: an AWS account with permission to create CloudFormation stacks, A
 The AWS template retains the DynamoDB tables and S3 bucket if the CloudFormation stack is deleted, to reduce accidental data loss. Review and deliberately remove retained resources if you later want to stop all related charges. Lambda logs are retained for 14 days. For a different region or service setup, review `teacher_portal/template.yaml` before deploying.
 
 The existing Cloudflare deployment remains available with `npm run deploy:cloudflare`; do not use it for the new AWS endpoint.
+Before deploying the updated Cloudflare portal, apply its D1 schema migrations from `teacher_portal`: `npx wrangler d1 migrations apply school-assessment-teacher-portal --remote`.
 
 Open `http://localhost:5000`. The Flask server binds to `0.0.0.0`, so other staff and students on the same Wi-Fi/LAN can use `http://lahs.local:5000` after the name is configured. The app advertises the name with Zeroconf, but `.local` discovery depends on mDNS support on each client and is not reliable on every Windows installation. For deterministic Windows access, run PowerShell as Administrator on each client:
 
