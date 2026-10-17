@@ -3,11 +3,18 @@ import sqlite3
 import tempfile
 import unittest
 import urllib.error
+import urllib.request
 from contextlib import closing
+from email.message import Message
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from cloud_sync import PortalSyncError, portal_request, sync_question_submissions
+from cloud_sync import (
+    PortalSyncError,
+    _PortalRedirectHandler,
+    portal_request,
+    sync_question_submissions,
+)
 
 
 REMOTE_ID = "123e4567-e89b-12d3-a456-426614174000"
@@ -47,8 +54,8 @@ class CloudSyncTests(unittest.TestCase):
         response = MagicMock()
         response.headers.get_content_type.return_value = "application/json"
         response.read.return_value = b"{}"
-        urlopen = MagicMock()
-        urlopen.return_value.__enter__.return_value = response
+        opener = MagicMock()
+        opener.open.return_value.__enter__.return_value = response
         token = "private-test-token-value-with-at-least-32-characters"
 
         with patch.dict(
@@ -57,10 +64,10 @@ class CloudSyncTests(unittest.TestCase):
                 "CLOUD_PORTAL_URL": "https://portal.example.workers.dev",
                 "CLOUD_PORTAL_SYNC_TOKEN": token,
             },
-        ), patch("cloud_sync.urllib.request.urlopen", urlopen):
+        ), patch("cloud_sync.urllib.request.build_opener", return_value=opener):
             portal_request("/api/sync/pending")
 
-        request = urlopen.call_args.args[0]
+        request = opener.open.call_args.args[0]
         self.assertEqual(request.get_header("Authorization"), f"Bearer {token}")
 
     def submission(self):
@@ -100,7 +107,8 @@ class CloudSyncTests(unittest.TestCase):
                 "CLOUD_PORTAL_URL": "https://portal.example.workers.dev",
                 "CLOUD_PORTAL_SYNC_TOKEN": token,
             },
-        ), patch("cloud_sync.urllib.request.urlopen", side_effect=error):
+        ), patch("cloud_sync.urllib.request.build_opener") as build_opener:
+            build_opener.return_value.open.side_effect = error
             with self.assertRaises(PortalSyncError) as raised:
                 portal_request("/api/sync/pending")
 
@@ -108,6 +116,24 @@ class CloudSyncTests(unittest.TestCase):
         self.assertIn("HTTP 403", str(raised.exception))
         self.assertIn("ray-test-123", str(raised.exception))
         self.assertNotIn(token, str(raised.exception))
+
+    def test_cross_origin_redirect_does_not_forward_authorization_or_cookies(self):
+        request = urllib.request.Request(
+            "https://portal.example.workers.dev/api/sync/submissions/image",
+            headers={"Authorization": "Bearer private-token", "Cookie": "portal_session=private"},
+        )
+        redirected = _PortalRedirectHandler().redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            Message(),
+            "https://private-bucket.s3.amazonaws.com/image?signature=private",
+        )
+
+        self.assertIsNotNone(redirected)
+        self.assertIsNone(redirected.get_header("Authorization"))
+        self.assertIsNone(redirected.get_header("Cookie"))
 
     def test_sync_downloads_question_and_optional_image_once(self):
         def portal_request(path, **kwargs):

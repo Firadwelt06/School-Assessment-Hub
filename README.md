@@ -77,63 +77,77 @@ The scheduled job runs in the Flask/Waitress process, so backups run only while 
 
 ### Online teacher question portal (Stage 2)
 
-The public teacher portal is a separate Cloudflare Worker with a private D1 database; it never connects to the school's local database. Each school uses its own Worker and D1 database. Teachers create separate portal accounts with a shared school signup code and submit questions (optionally with an image up to 5 MB). The local administrator uses **Administration → Online question submissions → Sync now** to download submissions, review them offline, and later sync decisions. Approval adds a question to the local bank only; the administrator must separately add it to an exam and publish that exam. Rejection feedback appears in the teacher's portal after decisions sync. From the submissions page, a local administrator can reset a portal password or enable/disable an individual portal account; disabling immediately revokes its active sessions.
+The public teacher portal is separate from the school's local database. Teachers create individual portal accounts with a shared school signup code and submit questions (optionally with an image up to 5 MB). The local administrator uses **Administration → Online question submissions → Sync now** to download submissions, review them offline, and later sync decisions. Approval adds a question to the local bank only; the administrator must separately add it to an exam and publish that exam. Rejection feedback appears in the teacher's portal after decisions sync.
 
-#### Deploy the portal
+#### Deploy a fresh AWS portal
 
-Prerequisites: a Cloudflare account with Workers, D1, and R2 available, and Node.js/npm installed on the computer used to deploy. The Worker uses the free Workers/D1 allowances for low-volume pilots; limits and pricing can change, so check [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/) and [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/). Teacher-uploaded images go to a separate private R2 bucket so the portal's image access is isolated from database backups.
+The AWS deployment uses API Gateway HTTP API, Lambda, on-demand DynamoDB tables, and a private S3 bucket. API Gateway gives the portal a managed HTTPS endpoint without the `workers.dev` hostname that was rejecting this app's sync requests. The endpoint is public; the portal still checks teacher sessions and the private Bearer sync token. This setup is designed for low traffic, but AWS charges may apply and free-tier eligibility varies. Check current AWS pricing for API Gateway, Lambda, DynamoDB, S3, and CloudWatch before deploying.
 
-1. In the Cloudflare dashboard, open **R2** and create a private bucket named `exam-arena-portal-images` (or another unique name). Keep public access disabled. If you choose another name, update `bucket_name` in `teacher_portal/wrangler.jsonc`.
-2. In PowerShell, install the portal tools and sign in:
+This deploy starts with empty AWS tables. It does **not** copy teachers, sessions, submissions, or images from the existing Cloudflare portal. Existing Cloudflare resources are left untouched.
+
+Prerequisites: an AWS account with permission to create CloudFormation stacks, API Gateway, Lambda, IAM roles, DynamoDB tables, S3 buckets, and CloudWatch log groups; AWS CLI and AWS SAM CLI installed; and Node.js/npm available.
+
+1. Open PowerShell in the portal project and install dependencies:
 
    ```powershell
    cd "E:\Projects (Working on)\Assessment\teacher_portal"
    npm install
-   npx wrangler login
    ```
 
-3. Create the portal's private database:
+2. Configure the AWS CLI locally and verify the selected account:
 
    ```powershell
-   npx wrangler d1 create school-assessment-teacher-portal
+   aws configure
+   aws sts get-caller-identity
    ```
 
-   Copy the `database_id` from the result into `teacher_portal/wrangler.jsonc`, replacing the all-zero placeholder.
-4. Apply the database schema:
+   Do not share or commit AWS credentials. Choose the AWS region where you want the portal data stored; the stack's API, Lambda, database tables, images, and logs are created in that region.
+
+3. Run checks and deploy:
 
    ```powershell
-   npx wrangler d1 migrations apply school-assessment-teacher-portal --remote
+   npm run typecheck
+   npm run test:aws
+   npm run deploy
    ```
 
-5. Generate a long random sync token in PowerShell:
+   The deploy command bundles the Lambda handler and starts `sam deploy --guided`. Choose a stack name and region, allow the IAM role creation, and confirm deployment. The output includes `TeacherPortalUrl`; copy the exact HTTPS URL.
+
+4. In the AWS Console, open **Lambda**, select the function named `<your-stack-name>-teacher-portal`, and open **Configuration → Environment variables → Edit**. Add:
+   - `SCHOOL_SIGNUP_CODE`: a long signup code to share privately with teachers.
+   - `SYNC_TOKEN`: a different, long random token reserved for app-to-portal sync.
+
+   Generate a random token locally if needed:
 
    ```powershell
    python -c "import secrets; print(secrets.token_urlsafe(48))"
    ```
 
-   Save it privately; use the exact same value in the next steps and in the local app. Do not send it in chat or commit it.
-6. Set the two Worker secrets. Wrangler prompts for each value; the signup code is shared with teachers, while the sync token must remain private:
+   Enter the token as its raw value—do not add `Bearer `. AWS encrypts Lambda environment variables at rest. Never put these values in source code, chat, or a committed config file.
+
+5. Test that the API endpoint is live without sending a token:
 
    ```powershell
-   npx wrangler secret put SCHOOL_SIGNUP_CODE
-   npx wrangler secret put SYNC_TOKEN
+   $portal = "PASTE-THE-EXACT-TeacherPortalUrl-OUTPUT"
+   curl.exe -i "$portal/api/sync/pending"
    ```
 
-   Enter a long, hard-to-guess signup code for `SCHOOL_SIGNUP_CODE`, and the generated sync token for `SYNC_TOKEN`. Keep the signup code private until you share it with teachers.
-7. Deploy:
+   **401 Unauthorized** is expected and confirms the sync route is reachable. A successful sync request uses `Authorization: Bearer <SYNC_TOKEN>`.
 
-   ```powershell
-   npm run typecheck
-   npm run deploy
+6. In the local app's `.env`, set the base URL and the same sync token:
+
+   ```dotenv
+   CLOUD_PORTAL_URL=https://your-api-id.execute-api.your-region.amazonaws.com
+   CLOUD_PORTAL_SYNC_TOKEN=the-same-private-sync-token
    ```
 
-   Wrangler prints the public HTTPS `workers.dev` URL. Keep this URL; it is the portal address teachers will use.
-8. In the local app's `.env`, set `CLOUD_PORTAL_URL` to the Worker URL and `CLOUD_PORTAL_SYNC_TOKEN` to the exact sync token from step 5. Restart the local app. The administrator can now open **Administration → Online question submissions** and select **Sync now**.
-9. Give teachers the portal URL and the school signup code. Each teacher registers an individual username and password. Portal passwords are separate from local app passwords; teachers can change them after signing in.
+   Do not append `/api/sync/pending` to the URL. Restart the local app, then test **Administration → Online question submissions → Sync now**.
 
-Only perform sync from the local administrator account. The app requires HTTPS for the portal connection and sends the sync token only to the configured URL. If the signup code is exposed, replace the `SCHOOL_SIGNUP_CODE` Worker secret and share the new code only with teachers who need access.
+7. Give teachers the portal URL and signup code. They must create new accounts on this fresh portal; existing Cloudflare accounts and submissions are not migrated. Leave the old Cloudflare portal in place until you have confirmed the AWS portal works and no longer need the old data.
 
-The D1 service stores pending submissions and review status. Images are stored privately in the separate R2 bucket. Cloud free-tier limits apply across usage, and exceeding them can stop requests or create charges depending on the service plan. Keep an independent backup of question submissions if they become business-critical.
+The AWS template retains the DynamoDB tables and S3 bucket if the CloudFormation stack is deleted, to reduce accidental data loss. Review and deliberately remove retained resources if you later want to stop all related charges. Lambda logs are retained for 14 days. For a different region or service setup, review `teacher_portal/template.yaml` before deploying.
+
+The existing Cloudflare deployment remains available with `npm run deploy:cloudflare`; do not use it for the new AWS endpoint.
 
 Open `http://localhost:5000`. The Flask server binds to `0.0.0.0`, so other staff and students on the same Wi-Fi/LAN can use `http://lahs.local:5000` after the name is configured. The app advertises the name with Zeroconf, but `.local` discovery depends on mDNS support on each client and is not reliable on every Windows installation. For deterministic Windows access, run PowerShell as Administrator on each client:
 

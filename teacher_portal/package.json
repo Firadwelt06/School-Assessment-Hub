@@ -5,12 +5,23 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit"
+    "deploy": "npm run build:aws && sam deploy --guided --template-file template.yaml",
+    "deploy:cloudflare": "wrangler deploy",
+    "build:aws": "esbuild src/aws.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/aws.js && node scripts/write-lambda-package.cjs",
+    "typecheck": "tsc --noEmit",
+    "test:aws": "npm run build:aws && node --test tests/aws-handler.test.cjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261016.1",
+    "@types/node": "^26.6.5",
+    "esbuild": "^0.28.2",
     "typescript": "^5.9.3",
     "wrangler": "^4.151.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1152.0",
+    "@aws-sdk/client-s3": "^3.1152.0",
+    "@aws-sdk/lib-dynamodb": "^3.1152.0",
+    "@aws-sdk/s3-request-presigner": "^3.1152.0"
   }
 }

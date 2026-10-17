@@ -23,6 +23,25 @@ class PortalSyncError(RuntimeError):
     pass
 
 
+class _PortalRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        redirected = super().redirect_request(
+            request,
+            file_pointer,
+            code,
+            message,
+            headers,
+            new_url,
+        )
+        if redirected:
+            source = urllib.parse.urlsplit(request.full_url)
+            target = urllib.parse.urlsplit(new_url)
+            if (source.scheme, source.netloc) != (target.scheme, target.netloc):
+                redirected.remove_header("Authorization")
+                redirected.remove_header("Cookie")
+        return redirected
+
+
 def portal_settings():
     base_url = os.getenv("CLOUD_PORTAL_URL", "").strip().rstrip("/")
     token = os.getenv("CLOUD_PORTAL_SYNC_TOKEN", "")
@@ -55,7 +74,8 @@ def portal_request(path, method="GET", payload=None, binary=False):
         method=method,
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        opener = urllib.request.build_opener(_PortalRedirectHandler())
+        with opener.open(request, timeout=30) as response:
             content_type = response.headers.get_content_type()
             body = response.read()
     except urllib.error.HTTPError as error:

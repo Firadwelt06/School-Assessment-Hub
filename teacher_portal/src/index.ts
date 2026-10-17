@@ -1,43 +1,10 @@
-interface Env {
-  DB: D1Database;
-  SUBMISSION_IMAGES: R2Bucket;
-  SCHOOL_SIGNUP_CODE: string;
-  SYNC_TOKEN: string;
-}
-
-interface Teacher {
-  id: number;
-  username: string;
-  full_name: string;
-}
-
-interface Submission {
-  id: string;
-  teacher_id: number;
-  teacher_name?: string;
-  teacher_username?: string;
-  subject: string;
-  topic: string;
-  class_name: string;
-  stem: string;
-  option_a: string;
-  option_b: string;
-  option_c: string;
-  option_d: string;
-  correct_option: string;
-  difficulty: string;
-  explanation: string;
-  standard: string;
-  image_key: string | null;
-  status: "pending" | "approved" | "rejected";
-  feedback: string;
-  submitted_at: string;
-}
+import type { PortalEnv as Env, Submission, Teacher } from "./portal-store.js";
 
 const SESSION_SECONDS = 7 * 24 * 60 * 60;
 const RATE_LIMIT_WINDOW_SECONDS = 15 * 60;
 const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const PASSWORD_ITERATIONS = 100_000;
 
 const escapeHtml = (value: unknown) =>
@@ -60,20 +27,28 @@ const json = (payload: unknown, status = 200, extraHeaders: HeadersInit = {}) =>
     },
   });
 
-function page(title: string, content: string, teacher?: Teacher, notice = "") {
+function page(
+  title: string,
+  content: string,
+  teacher?: Teacher,
+  notice = "",
+  imageSource: string | null = null,
+  script = "",
+) {
+  const nonce = toBase64Url(crypto.getRandomValues(new Uint8Array(18)));
   const nav = teacher
     ? `<header><a href="/">School Assessment Hub</a><span>${escapeHtml(teacher.full_name)} · ${escapeHtml(teacher.username)}</span><form method="post" action="/logout"><button>Sign out</button></form></header>`
     : `<header><a href="/">School Assessment Hub</a><span>Teacher question portal</span></header>`;
   return new Response(
     `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · School Assessment Hub</title><style>
       :root{font-family:system-ui,Segoe UI,sans-serif;color:#172b4d;background:#f3f6fa}body{margin:0}header{display:flex;gap:1rem;align-items:center;justify-content:space-between;padding:1rem max(1rem,calc((100% - 960px)/2));background:#102a43;color:#fff}header a{color:#fff;font-weight:700;text-decoration:none}header span{font-size:.9rem}main{max-width:960px;margin:2rem auto;padding:0 1rem}.panel{background:#fff;border:1px solid #d7e0ea;border-radius:12px;padding:1.25rem;margin:1rem 0}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}label{display:block;font-weight:600}label small{display:block;color:#52677d;font-weight:400}input,select,textarea{box-sizing:border-box;width:100%;padding:.7rem;border:1px solid #829ab1;border-radius:6px;margin-top:.35rem;font:inherit}textarea{min-height:6rem}button,.button{display:inline-block;border:0;border-radius:6px;padding:.7rem 1rem;background:#0b65a5;color:white;font:inherit;font-weight:600;text-decoration:none;cursor:pointer}button.secondary{background:#e7eef5;color:#102a43}button.danger{background:#a61b1b}.full{grid-column:1/-1}.notice{padding:.8rem 1rem;background:#e6f4ea;border-radius:6px}.error{background:#fde8e8}.muted{color:#52677d}.status{font-weight:700}.status-pending{color:#8a4b08}.status-approved{color:#16723c}.status-rejected{color:#a61b1b}img.submission-image{display:block;max-width:min(100%,420px);max-height:320px;object-fit:contain;margin:.75rem 0;border:1px solid #d7e0ea}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:.7rem;border-bottom:1px solid #d7e0ea;vertical-align:top}.actions{display:flex;gap:.5rem;flex-wrap:wrap}@media(max-width:640px){header{flex-wrap:wrap}.grid{grid-template-columns:1fr}.full{grid-column:auto}table{display:block;overflow:auto}}
-    </style></head><body>${nav}<main>${notice ? `<p class="notice">${escapeHtml(notice)}</p>` : ""}${content}</main></body></html>`,
+    </style></head><body>${nav}<main>${notice ? `<p class="notice">${escapeHtml(notice)}</p>` : ""}${content}</main>${script ? `<script nonce="${nonce}">${script}</script>` : ""}</body></html>`,
     {
       status: 200,
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store",
-        "Content-Security-Policy": "default-src 'self'; img-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'",
+        "Content-Security-Policy": `default-src 'self'; img-src 'self'${imageSource ? ` ${imageSource}` : ""}; connect-src 'self'${imageSource ? ` ${imageSource}` : ""}; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'`,
         "X-Content-Type-Options": "nosniff",
         "Referrer-Policy": "same-origin",
       },
@@ -172,12 +147,12 @@ async function sameSecret(expected: string, supplied: string) {
 }
 
 async function rateLimitState(env: Env, request: Request, action: string) {
-  const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  const address = request.headers.get("CF-Connecting-IP")
+    || request.headers.get("x-portal-client-ip")
+    || "unknown";
   const key = await sha256(`${action}:${address}`);
   const now = Math.floor(Date.now() / 1000);
-  const record = await env.DB.prepare(
-    "SELECT attempts, window_started FROM rate_limits WHERE rate_key = ?",
-  ).bind(key).first<{ attempts: number; window_started: number }>();
+  const record = await env.store.getRateLimit(key);
   if (
     record &&
     now - record.window_started < RATE_LIMIT_WINDOW_SECONDS &&
@@ -189,12 +164,7 @@ async function rateLimitState(env: Env, request: Request, action: string) {
 }
 
 async function recordRateLimitedAttempt(env: Env, state: { key: string; now: number }) {
-  await env.DB.prepare(
-    `INSERT INTO rate_limits(rate_key, attempts, window_started) VALUES (?, 1, ?)
-     ON CONFLICT(rate_key) DO UPDATE SET
-     attempts = CASE WHEN ? - window_started >= ${RATE_LIMIT_WINDOW_SECONDS} THEN 1 ELSE attempts + 1 END,
-     window_started = CASE WHEN ? - window_started >= ${RATE_LIMIT_WINDOW_SECONDS} THEN ? ELSE window_started END`,
-  ).bind(state.key, state.now, state.now, state.now, state.now).run();
+  await env.store.recordRateLimitedAttempt(state.key, state.now);
 }
 
 async function getTeacher(request: Request, env: Env): Promise<Teacher | null> {
@@ -202,12 +172,7 @@ async function getTeacher(request: Request, env: Env): Promise<Teacher | null> {
   if (!token) return null;
   const tokenHash = await sha256(token);
   const now = Math.floor(Date.now() / 1000);
-  const record = await env.DB.prepare(
-    `SELECT teachers.id, teachers.username, teachers.full_name
-     FROM sessions JOIN teachers ON teachers.id = sessions.teacher_id
-     WHERE sessions.token_hash = ? AND sessions.expires_at > ? AND teachers.active = 1`,
-  ).bind(tokenHash, now).first<Teacher>();
-  return record ?? null;
+  return env.store.findTeacherForSession(tokenHash, now);
 }
 
 function validOrigin(request: Request) {
@@ -270,7 +235,56 @@ function submissionCard(item: Submission) {
     ${item.feedback ? `<p class="notice ${status === "rejected" ? "error" : ""}"><strong>Administrator feedback:</strong> ${escapeHtml(item.feedback)}</p>` : ""}</article>`;
 }
 
-function dashboardPage(teacher: Teacher, submissions: Submission[], notice = "") {
+function dashboardPage(
+  teacher: Teacher,
+  submissions: Submission[],
+  notice = "",
+  imageSource: string | null = null,
+) {
+  const directImageUpload = `(() => {
+    const form = document.querySelector('form[action="/submit"]');
+    const imageInput = form?.querySelector('input[name="question_image"]');
+    if (!form || !imageInput) return;
+    const imageKeyInput = document.createElement("input");
+    imageKeyInput.type = "hidden";
+    imageKeyInput.name = "question_image_key";
+    form.append(imageKeyInput);
+    let submitting = false;
+    form.addEventListener("submit", async (event) => {
+      const file = imageInput.files?.[0];
+      if (submitting || !file) return;
+      event.preventDefault();
+      const button = form.querySelector("button");
+      if (button) button.disabled = true;
+      try {
+        const preparedResponse = await fetch("/api/image-upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content_type: file.type, size: file.size }),
+        });
+        if (preparedResponse.status === 501) {
+          submitting = true;
+          form.requestSubmit();
+          return;
+        }
+        const prepared = await preparedResponse.json();
+        if (!preparedResponse.ok) throw new Error(prepared.error || "Could not prepare the image upload.");
+        const uploadResponse = await fetch(prepared.upload_url, {
+          method: "PUT",
+          headers: prepared.upload_headers,
+          body: file,
+        });
+        if (!uploadResponse.ok) throw new Error("The image upload failed. Please retry.");
+        imageKeyInput.value = prepared.image_key;
+        imageInput.disabled = true;
+        submitting = true;
+        form.requestSubmit();
+      } catch (error) {
+        window.alert(error instanceof Error ? error.message : "The image upload failed. Please retry.");
+        if (button) button.disabled = false;
+      }
+    });
+  })();`;
   const records = submissions.length
     ? submissions.map(submissionCard).join("")
     : `<section class="panel"><p>No question submissions yet. Use the form below to submit your first question.</p></section>`;
@@ -296,6 +310,8 @@ function dashboardPage(teacher: Teacher, submissions: Submission[], notice = "")
     <h2>Your submissions</h2>${records}`,
     teacher,
     notice,
+    imageSource,
+    directImageUpload,
   );
 }
 
@@ -308,19 +324,19 @@ async function login(request: Request, env: Env) {
   const form = await request.formData();
   const username = normalizeUsername(text(form, "username"));
   const password = formValue(form, "password");
-  const teacher = await env.DB.prepare(
-    "SELECT id, username, full_name, password_hash FROM teachers WHERE username = ? AND active = 1",
-  ).bind(username).first<Teacher & { password_hash: string }>();
+  const teacher = await env.store.findTeacherForLogin(username);
   if (!teacher || password.length > 128 || !await verifyPassword(password, teacher.password_hash)) {
     await recordRateLimitedAttempt(env, rateState);
     return loginPage("Username or password is incorrect.");
   }
   const sessionToken = toBase64Url(crypto.getRandomValues(new Uint8Array(32)));
   const expiresAt = Math.floor(Date.now() / 1000) + SESSION_SECONDS;
-  await env.DB.prepare("DELETE FROM sessions WHERE expires_at <= ?").bind(Math.floor(Date.now() / 1000)).run();
-  await env.DB.prepare(
-    "INSERT INTO sessions(token_hash, teacher_id, expires_at) VALUES (?, ?, ?)",
-  ).bind(await sha256(sessionToken), teacher.id, expiresAt).run();
+  await env.store.deleteExpiredSessions(Math.floor(Date.now() / 1000));
+  await env.store.createSession({
+    token_hash: await sha256(sessionToken),
+    teacher_id: teacher.id,
+    expires_at: expiresAt,
+  });
   return redirect("/", {
     "Set-Cookie": setCookie(sessionToken, SESSION_SECONDS, new URL(request.url).protocol === "https:"),
   });
@@ -353,16 +369,14 @@ async function register(request: Request, env: Env) {
     await recordRateLimitedAttempt(env, rateState);
     return registerPage("Choose a password between 8 and 128 characters.");
   }
-  try {
-    await env.DB.prepare(
-      "INSERT INTO teachers(username, full_name, password_hash, created_at) VALUES (?, ?, ?, ?)",
-    ).bind(username, fullName, await hashPassword(password), new Date().toISOString()).run();
-  } catch (error) {
-    if (String(error).includes("UNIQUE constraint failed")) {
-      return registerPage("That username is already in use. Choose another one.");
-    }
-    throw error;
-  }
+  const created = await env.store.createTeacher({
+    id: username,
+    username,
+    full_name: fullName,
+    password_hash: await hashPassword(password),
+    created_at: new Date().toISOString(),
+  });
+  if (!created) return registerPage("That username is already in use. Choose another one.");
   return loginPage("Your teacher account was created. Sign in to submit questions.", true);
 }
 
@@ -370,10 +384,15 @@ async function submitQuestion(request: Request, env: Env, teacher: Teacher) {
   if (!validOrigin(request)) return json({ error: "The submission request could not be verified." }, 403);
   const contentLength = Number(request.headers.get("Content-Length") ?? 0);
   if (contentLength > IMAGE_MAX_BYTES + 128 * 1024) {
-    return dashboardPage(teacher, await ownSubmissions(env, teacher.id), "Submission exceeds the 5 MB image limit.");
+    return dashboardPage(
+      teacher,
+      await ownSubmissions(env, teacher.id),
+      "Submission exceeds the 5 MB image limit.",
+      env.images.getAllowedImageSource(),
+    );
   }
   const showError = async (message: string) =>
-    dashboardPage(teacher, await ownSubmissions(env, teacher.id), message);
+    dashboardPage(teacher, await ownSubmissions(env, teacher.id), message, env.images.getAllowedImageSource());
   const form = await request.formData();
   const submission = {
     subject: text(form, "subject"),
@@ -411,8 +430,33 @@ async function submitQuestion(request: Request, env: Env, teacher: Teacher) {
   }
 
   let imageKey: string | null = null;
+  let imageUploadKey: string | undefined;
+  const submittedImageKey = text(form, "question_image_key");
   const image = form.get("question_image");
-  if (image && typeof image !== "string" && image.size > 0) {
+  if (submittedImageKey) {
+    const prefix = `teacher-submissions/images/${teacher.id}/`;
+    const imageId = submittedImageKey.startsWith(prefix)
+      ? submittedImageKey.slice(prefix.length)
+      : "";
+    if (!UUID_PATTERN.test(imageId) || !await env.store.ownsImageUpload(
+      submittedImageKey,
+      teacher.id,
+      Math.floor(Date.now() / 1000),
+    )) {
+      return showError("The uploaded image is invalid or expired. Please upload it again.");
+    }
+    const uploadedImage = await env.images.get(submittedImageKey);
+    if (
+      !uploadedImage ||
+      uploadedImage.data.length > IMAGE_MAX_BYTES ||
+      !IMAGE_MIME_TYPES.has(uploadedImage.contentType) ||
+      !validImageSignature(uploadedImage.data, uploadedImage.contentType)
+    ) {
+      return showError("The uploaded file is invalid. Please choose a PNG, JPG, WEBP, or GIF image up to 5 MB.");
+    }
+    imageKey = submittedImageKey;
+    imageUploadKey = submittedImageKey;
+  } else if (image && typeof image !== "string" && image.size > 0) {
     if (image.size > IMAGE_MAX_BYTES || !IMAGE_MIME_TYPES.has(image.type)) {
       return showError("Choose a PNG, JPG, WEBP, or GIF image up to 5 MB.");
     }
@@ -421,27 +465,27 @@ async function submitQuestion(request: Request, env: Env, teacher: Teacher) {
       return showError("The uploaded file does not match its image type.");
     }
     imageKey = `teacher-submissions/images/${crypto.randomUUID()}`;
-    await env.SUBMISSION_IMAGES.put(imageKey, data, {
-      httpMetadata: { contentType: image.type, cacheControl: "private, max-age=0" },
-    });
+    await env.images.put(imageKey, data, image.type);
   }
 
   const id = crypto.randomUUID();
   const submittedAt = new Date().toISOString();
   try {
-    await env.DB.prepare(
-      `INSERT INTO question_submissions
-      (id, teacher_id, subject, topic, class_name, stem, option_a, option_b, option_c,
-       option_d, correct_option, difficulty, explanation, standard, image_key, status, submitted_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
-    ).bind(
-      id, teacher.id, submission.subject, submission.topic, submission.class_name,
-      submission.stem, submission.option_a, submission.option_b, submission.option_c,
-      submission.option_d, submission.correct_option, submission.difficulty,
-      submission.explanation, submission.standard, imageKey, submittedAt,
-    ).run();
+    if (imageUploadKey) await env.images.finalizeUpload(imageUploadKey);
+    await env.store.createSubmission({
+      id,
+      teacher_id: teacher.id,
+      teacher_name: teacher.full_name,
+      teacher_username: teacher.username,
+      ...submission,
+      image_key: imageKey,
+      status: "pending",
+      feedback: "",
+      submitted_at: submittedAt,
+    }, imageUploadKey);
   } catch (error) {
-    if (imageKey) await env.SUBMISSION_IMAGES.delete(imageKey);
+    if (imageKey) await env.images.delete(imageKey);
+    if (imageUploadKey) await env.store.removeImageUpload(imageUploadKey);
     throw error;
   }
   return redirect("/", { "Location": "/?notice=Question%20submitted%20for%20administrator%20review." });
@@ -469,47 +513,51 @@ async function changePassword(request: Request, env: Env, teacher: Teacher) {
   const form = await request.formData();
   const currentPassword = formValue(form, "current_password");
   const newPassword = formValue(form, "new_password");
-  const account = await env.DB.prepare(
-    "SELECT password_hash FROM teachers WHERE id = ? AND active = 1",
-  ).bind(teacher.id).first<{ password_hash: string }>();
+  const account = await env.store.getTeacherPassword(teacher.id);
   if (!account || !await verifyPassword(currentPassword, account.password_hash)) {
     const submissions = await ownSubmissions(env, teacher.id);
-    return dashboardPage(teacher, submissions, "Current password is incorrect.");
+    return dashboardPage(teacher, submissions, "Current password is incorrect.", env.images.getAllowedImageSource());
   }
   if (newPassword.length < 8 || newPassword.length > 128) {
     const submissions = await ownSubmissions(env, teacher.id);
-    return dashboardPage(teacher, submissions, "New password must be between 8 and 128 characters.");
+    return dashboardPage(
+      teacher,
+      submissions,
+      "New password must be between 8 and 128 characters.",
+      env.images.getAllowedImageSource(),
+    );
   }
-  await env.DB.prepare("UPDATE teachers SET password_hash = ? WHERE id = ?")
-    .bind(await hashPassword(newPassword), teacher.id).run();
-  await env.DB.prepare("DELETE FROM sessions WHERE teacher_id = ?").bind(teacher.id).run();
+  await env.store.updateTeacherPassword(teacher.id, await hashPassword(newPassword));
+  await env.store.deleteTeacherSessions(teacher.id);
   const secure = new URL(request.url).protocol === "https:";
   return redirect("/login?notice=Password%20changed.%20Please%20sign%20in%20again.", {
     "Set-Cookie": clearCookie(secure),
   });
 }
 
-async function ownSubmissions(env: Env, teacherId: number) {
-  const result = await env.DB.prepare(
-    "SELECT * FROM question_submissions WHERE teacher_id = ? ORDER BY submitted_at DESC LIMIT 100",
-  ).bind(teacherId).all<Submission>();
-  return result.results;
+async function ownSubmissions(env: Env, teacherId: string) {
+  return env.store.listTeacherSubmissions(teacherId);
 }
 
 async function serveTeacherImage(request: Request, env: Env, teacher: Teacher, id: string) {
-  const submission = await env.DB.prepare(
-    "SELECT image_key FROM question_submissions WHERE id = ? AND teacher_id = ?",
-  ).bind(id, teacher.id).first<{ image_key: string | null }>();
-  if (!submission?.image_key) return new Response("Not found", { status: 404 });
-  return serveImage(env, submission.image_key);
+  const imageKey = await env.store.getTeacherSubmissionImageKey(id, teacher.id);
+  if (!imageKey) return new Response("Not found", { status: 404 });
+  return serveImage(env, imageKey);
 }
 
 async function serveImage(env: Env, key: string) {
-  const object = await env.SUBMISSION_IMAGES.get(key);
+  const signedUrl = await env.images.getReadUrl(key);
+  if (signedUrl) {
+    return redirect(signedUrl, {
+      "Cache-Control": "private, no-store",
+      "Referrer-Policy": "no-referrer",
+    });
+  }
+  const object = await env.images.get(key);
   if (!object) return new Response("Not found", { status: 404 });
-  return new Response(object.body, {
+  return new Response(new Uint8Array(object.data), {
     headers: {
-      "Content-Type": object.httpMetadata?.contentType ?? "application/octet-stream",
+      "Content-Type": object.contentType || "application/octet-stream",
       "Cache-Control": "private, no-store",
       "X-Content-Type-Options": "nosniff",
     },
@@ -521,17 +569,9 @@ async function syncPending(request: Request, env: Env) {
   const url = new URL(request.url);
   const cursor = url.searchParams.get("cursor") ?? "";
   if (cursor && !/^[0-9a-fA-F-]{36}$/.test(cursor)) return json({ error: "Invalid cursor." }, 400);
-  const submissions = await env.DB.prepare(
-    `SELECT s.id, t.full_name AS teacher_name, t.username AS teacher_username,
-      s.subject, s.topic, s.class_name, s.stem, s.option_a, s.option_b, s.option_c, s.option_d,
-      s.correct_option, s.difficulty, s.explanation, s.standard, s.image_key IS NOT NULL AS image,
-      s.submitted_at
-     FROM question_submissions s JOIN teachers t ON t.id = s.teacher_id
-     WHERE s.status = 'pending' AND s.id > ?
-     ORDER BY s.id LIMIT 101`,
-  ).bind(cursor).all<Omit<Submission, "image_key" | "status" | "feedback"> & { image: number }>();
-  const hasMore = submissions.results.length > 100;
-  const pageItems = submissions.results.slice(0, 100).map(({ image, ...item }) => ({
+  const submissions = await env.store.listPendingSubmissions(cursor);
+  const hasMore = submissions.length > 100;
+  const pageItems = submissions.slice(0, 100).map(({ image, ...item }) => ({
     ...item,
     image: Boolean(image),
   }));
@@ -544,11 +584,40 @@ async function syncPending(request: Request, env: Env) {
 async function syncSubmissionImage(request: Request, env: Env, id: string) {
   if (!await requireSyncToken(request, env)) return json({ error: "Unauthorized." }, 401);
   if (!/^[0-9a-fA-F-]{36}$/.test(id)) return json({ error: "Not found." }, 404);
-  const item = await env.DB.prepare(
-    "SELECT image_key FROM question_submissions WHERE id = ?",
-  ).bind(id).first<{ image_key: string | null }>();
-  if (!item?.image_key) return json({ error: "Image not found." }, 404);
-  return serveImage(env, item.image_key);
+  const imageKey = await env.store.getSubmissionImageKey(id);
+  if (!imageKey) return json({ error: "Image not found." }, 404);
+  return serveImage(env, imageKey);
+}
+
+async function prepareImageUpload(request: Request, env: Env) {
+  if (!validOrigin(request)) return json({ error: "The upload request could not be verified." }, 403);
+  const teacher = await getTeacher(request, env);
+  if (!teacher) return json({ error: "Sign in again before uploading an image." }, 401);
+  let body: Record<string, unknown>;
+  try {
+    body = await readJson(request);
+  } catch {
+    return json({ error: "Invalid upload request." }, 400);
+  }
+  if (
+    typeof body.content_type !== "string" ||
+    !IMAGE_MIME_TYPES.has(body.content_type) ||
+    typeof body.size !== "number" ||
+    !Number.isInteger(body.size) ||
+    body.size < 1 ||
+    body.size > IMAGE_MAX_BYTES
+  ) {
+    return json({ error: "Choose a PNG, JPG, WEBP, or GIF image up to 5 MB." }, 400);
+  }
+  const uploadKey = `teacher-submissions/images/${teacher.id}/${crypto.randomUUID()}`;
+  const upload = await env.images.getUploadUrl(uploadKey, body.content_type, body.size);
+  if (!upload) return json({ error: "Direct image uploads are not available on this portal." }, 501);
+  await env.store.createImageUpload(uploadKey, teacher.id, Math.floor(Date.now() / 1000) + 300);
+  return json({
+    image_key: uploadKey,
+    upload_url: upload.url,
+    upload_headers: upload.headers,
+  });
 }
 
 async function syncDecisions(request: Request, env: Env) {
@@ -576,17 +645,8 @@ async function syncDecisions(request: Request, env: Env) {
         typeof feedback !== "string" || feedback.length > 1000) {
       return json({ error: "Invalid decision item." }, 400);
     }
-    const update = await env.DB.prepare(
-      "UPDATE question_submissions SET status = ?, feedback = ?, decided_at = ? WHERE id = ? AND status = 'pending'",
-    ).bind(status, feedback.trim(), new Date().toISOString(), id).run();
-    if (update.meta.changes > 0) {
-      syncedIds.push(id);
-      continue;
-    }
-    const current = await env.DB.prepare(
-      "SELECT status FROM question_submissions WHERE id = ?",
-    ).bind(id).first<{ status: string }>();
-    if (current?.status === status) syncedIds.push(id);
+    const result = await env.store.applyDecision(id, status, feedback.trim(), new Date().toISOString());
+    if (result !== "conflict") syncedIds.push(id);
     else conflicts.push(id);
   }
   return json({ synced_ids: syncedIds, conflicts });
@@ -607,12 +667,10 @@ async function resetTeacherPassword(request: Request, env: Env) {
   if (!/^[a-z0-9._-]{3,64}$/.test(username) || body.password.length < 8 || body.password.length > 128) {
     return json({ error: "Username or password does not meet the requirements." }, 400);
   }
-  const teacher = await env.DB.prepare("SELECT id FROM teachers WHERE username = ? AND active = 1")
-    .bind(username).first<{ id: number }>();
-  if (!teacher) return json({ error: "No active teacher account matches that username." }, 404);
-  await env.DB.prepare("UPDATE teachers SET password_hash = ? WHERE id = ?")
-    .bind(await hashPassword(body.password), teacher.id).run();
-  await env.DB.prepare("DELETE FROM sessions WHERE teacher_id = ?").bind(teacher.id).run();
+  const teacher = await env.store.findTeacherByUsername(username);
+  if (!teacher?.active) return json({ error: "No active teacher account matches that username." }, 404);
+  await env.store.updateTeacherPassword(teacher.id, await hashPassword(body.password));
+  await env.store.deleteTeacherSessions(teacher.id);
   return json({ ok: true });
 }
 
@@ -631,14 +689,10 @@ async function setTeacherActive(request: Request, env: Env) {
   if (!/^[a-z0-9._-]{3,64}$/.test(username)) {
     return json({ error: "Invalid portal username." }, 400);
   }
-  const teacher = await env.DB.prepare("SELECT id FROM teachers WHERE username = ?")
-    .bind(username).first<{ id: number }>();
+  const teacher = await env.store.findTeacherByUsername(username);
   if (!teacher) return json({ error: "No portal account matches that username." }, 404);
-  await env.DB.prepare("UPDATE teachers SET active = ? WHERE id = ?")
-    .bind(Number(body.active), teacher.id).run();
-  if (!body.active) {
-    await env.DB.prepare("DELETE FROM sessions WHERE teacher_id = ?").bind(teacher.id).run();
-  }
+  await env.store.setTeacherActive(teacher.id, body.active);
+  if (!body.active) await env.store.deleteTeacherSessions(teacher.id);
   return json({ ok: true });
 }
 
@@ -651,10 +705,11 @@ async function router(request: Request, env: Env): Promise<Response> {
   if (method === "GET" && path === "/register") return registerPage();
   if (method === "POST" && path === "/login") return login(request, env);
   if (method === "POST" && path === "/register") return register(request, env);
+  if (method === "POST" && path === "/api/image-upload") return prepareImageUpload(request, env);
   if (method === "POST" && path === "/logout") {
     if (!validOrigin(request)) return new Response("Forbidden", { status: 403 });
     const token = request.headers.get("Cookie")?.match(/(?:^|;\s*)portal_session=([A-Za-z0-9_-]+)/)?.[1];
-    if (token) await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(await sha256(token)).run();
+    if (token) await env.store.deleteSession(await sha256(token));
     return redirect("/login", {
       "Set-Cookie": clearCookie(new URL(request.url).protocol === "https:"),
     });
@@ -679,7 +734,7 @@ async function router(request: Request, env: Env): Promise<Response> {
     if (!teacher) return redirect("/login");
     const submissions = await ownSubmissions(env, teacher.id);
     const notice = url.searchParams.get("notice") ?? "";
-    return dashboardPage(teacher, submissions, notice);
+    return dashboardPage(teacher, submissions, notice, env.images.getAllowedImageSource());
   }
   if (method === "POST" && path === "/submit") {
     if (!teacher) return redirect("/login");
@@ -697,19 +752,21 @@ async function router(request: Request, env: Env): Promise<Response> {
   return new Response("Not found", { status: 404 });
 }
 
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    try {
-      return await router(request, env);
-    } catch (error) {
-      console.error("Teacher portal request failed.", error);
-      if (new URL(request.url).pathname.startsWith("/api/")) {
-        return json({ error: "The portal could not complete the request. Try again later." }, 500);
-      }
-      return new Response(
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Portal error</title><h1>Something went wrong</h1><p>Please try again later or contact your school administrator.</p></html>",
-        { status: 500, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } },
-      );
+export async function handleRequest(request: Request, env: Env): Promise<Response> {
+  try {
+    return await router(request, env);
+  } catch (error) {
+    console.error("Teacher portal request failed.", error);
+    if (new URL(request.url).pathname.startsWith("/api/")) {
+      return json({ error: "The portal could not complete the request. Try again later." }, 500);
     }
-  },
+    return new Response(
+      "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Portal error</title><h1>Something went wrong</h1><p>Please try again later or contact your school administrator.</p></html>",
+      { status: 500, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } },
+    );
+  }
+}
+
+export default {
+  fetch: handleRequest,
 };

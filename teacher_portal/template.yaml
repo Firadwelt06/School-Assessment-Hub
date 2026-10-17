@@ -1,0 +1,230 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: School Assessment Hub teacher portal API on AWS
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Timeout: 30
+    MemorySize: 512
+    Architectures:
+      - arm64
+
+Resources:
+  TeacherPortalApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: $default
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 40
+        ThrottlingRateLimit: 20
+
+  TeacherPortalFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-teacher-portal"
+      CodeUri: dist/
+      Handler: aws.handler
+      Events:
+        Root:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref TeacherPortalApi
+            Path: /
+            Method: ANY
+        PortalPaths:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref TeacherPortalApi
+            Path: /{proxy+}
+            Method: ANY
+      Environment:
+        Variables:
+          TEACHERS_TABLE: !Ref TeachersTable
+          SESSIONS_TABLE: !Ref SessionsTable
+          SUBMISSIONS_TABLE: !Ref SubmissionsTable
+          RATE_LIMITS_TABLE: !Ref RateLimitsTable
+          IMAGE_UPLOADS_TABLE: !Ref ImageUploadsTable
+          SUBMISSION_IMAGES_BUCKET: !Ref SubmissionImages
+          SCHOOL_SIGNUP_CODE: ""
+          SYNC_TOKEN: ""
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+                - dynamodb:Query
+                - dynamodb:TransactWriteItems
+              Resource:
+                - !GetAtt TeachersTable.Arn
+                - !GetAtt SessionsTable.Arn
+                - !Sub "${SessionsTable.Arn}/index/*"
+                - !GetAtt SubmissionsTable.Arn
+                - !Sub "${SubmissionsTable.Arn}/index/*"
+                - !GetAtt RateLimitsTable.Arn
+                - !GetAtt ImageUploadsTable.Arn
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+                - s3:DeleteObject
+                - s3:PutObjectTagging
+              Resource: !Sub "${SubmissionImages.Arn}/*"
+  TeacherPortalLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-teacher-portal"
+      RetentionInDays: 14
+
+  TeachersTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: username
+          AttributeType: S
+      KeySchema:
+        - AttributeName: username
+          KeyType: HASH
+
+  SessionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      AttributeDefinitions:
+        - AttributeName: token_hash
+          AttributeType: S
+        - AttributeName: teacher_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: token_hash
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: TeacherSessionsIndex
+          KeySchema:
+            - AttributeName: teacher_id
+              KeyType: HASH
+            - AttributeName: token_hash
+              KeyType: RANGE
+          Projection:
+            ProjectionType: KEYS_ONLY
+
+  SubmissionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: teacher_id
+          AttributeType: S
+        - AttributeName: teacher_submitted
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: TeacherSubmissionsIndex
+          KeySchema:
+            - AttributeName: teacher_id
+              KeyType: HASH
+            - AttributeName: teacher_submitted
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: PendingSubmissionsIndex
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: id
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  RateLimitsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      AttributeDefinitions:
+        - AttributeName: rate_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: rate_key
+          KeyType: HASH
+
+  ImageUploadsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      AttributeDefinitions:
+        - AttributeName: image_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: image_key
+          KeyType: HASH
+
+  SubmissionImages:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - !Sub "https://${TeacherPortalApi}.execute-api.${AWS::Region}.amazonaws.com"
+            AllowedMethods:
+              - PUT
+            AllowedHeaders:
+              - content-type
+              - content-length
+              - if-none-match
+              - x-amz-tagging
+            MaxAge: 300
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-abandoned-portal-image-uploads
+            Status: Enabled
+            Filter:
+              Tag:
+                Key: portal-image-state
+                Value: staged
+            Expiration:
+              Days: 1
+
+Outputs:
+  TeacherPortalUrl:
+    Description: HTTPS address for the teacher portal and sync API
+    Value: !Sub "https://${TeacherPortalApi}.execute-api.${AWS::Region}.amazonaws.com"
