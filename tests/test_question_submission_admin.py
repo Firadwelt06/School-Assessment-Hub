@@ -131,14 +131,36 @@ class QuestionSubmissionAdminTests(unittest.TestCase):
         )
 
     def test_admin_can_reset_a_portal_teacher_password_through_sync(self):
-        with patch.object(assessment_app, "send_portal_teacher_password_reset") as reset_password:
+        assessment_app.execute(
+            """INSERT OR REPLACE INTO users
+            (username, full_name, password_hash, role, class_name, subjects, active, created_at)
+            VALUES (?, ?, ?, 'teacher', '', 'Biology', 1, ?)""",
+            (
+                "teacher.name",
+                "Teacher Name",
+                assessment_app.hash_password("OldTeacherPass123"),
+                "2026-10-15T12:00:00",
+            ),
+        )
+        with patch.object(assessment_app, "send_portal_teacher_password_hash") as reset_password:
             response = self.client.post(
                 "/admin/question-submissions/reset-password",
                 data={"username": "teacher.name", "password": "TemporaryPass123"},
             )
 
         self.assertEqual(response.status_code, 302)
-        reset_password.assert_called_once_with("teacher.name", "TemporaryPass123")
+        reset_password.assert_called_once()
+        username, full_name, password_hash, active = reset_password.call_args.args
+        self.assertEqual((username, full_name, active), ("teacher.name", "Teacher Name", True))
+        self.assertTrue(assessment_app.check_password("TemporaryPass123", password_hash))
+        self.assertEqual(
+            assessment_app.query(
+                "SELECT password_hash FROM users WHERE username = ?",
+                ("teacher.name",),
+                one=True,
+            )["password_hash"],
+            password_hash,
+        )
 
     def test_admin_can_enable_or_disable_a_portal_teacher(self):
         with patch.object(assessment_app, "send_portal_teacher_status") as set_status:
@@ -149,6 +171,80 @@ class QuestionSubmissionAdminTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 302)
         set_status.assert_called_once_with("teacher.name", False)
+
+    def test_teacher_results_require_both_assigned_subject_and_class(self):
+        teacher_id = assessment_app.execute(
+            """INSERT INTO users
+            (username, full_name, password_hash, role, class_name, subjects, active, created_at)
+            VALUES (?, ?, ?, 'teacher', '', 'Biology', 1, ?)""",
+            ("scope.teacher", "Scope Teacher", assessment_app.hash_password("TeacherPass123"),
+             "2026-10-15T12:00:00"),
+        )
+        assessment_app.execute(
+            "INSERT INTO teacher_class_assignments(teacher_id, class_name) VALUES (?, ?)",
+            (teacher_id, "SS1"),
+        )
+        inserted_usernames = []
+        for index, (username, name, subject, class_name) in enumerate(
+            [
+                ("scope.student.allowed", "Assigned Student", "Biology", "SS1"),
+                ("scope.student.class", "Wrong Class Student", "Biology", "SS2"),
+                ("scope.student.subject", "Wrong Subject Student", "Chemistry", "SS1"),
+            ]
+        ):
+            inserted_usernames.append(username)
+            student_id = assessment_app.execute(
+                """INSERT INTO users
+                (username, full_name, password_hash, role, class_name, active, created_at)
+                VALUES (?, ?, ?, 'student', ?, 1, ?)""",
+                (username, name, assessment_app.hash_password("StudentPass123"), class_name,
+                 "2026-10-15T12:00:00"),
+            )
+            exam_id = assessment_app.execute(
+                """INSERT INTO exams
+                (title, subject, class_name, exam_type, duration_minutes, created_by, published, created_at)
+                VALUES (?, ?, ?, 'quiz', 30, ?, 1, ?)""",
+                (f"Scope Exam {index}", subject, class_name, teacher_id, "2026-10-15T12:00:00"),
+            )
+            assessment_app.execute(
+                """INSERT INTO attempts
+                (exam_id, student_id, score, total, started_at, submitted_at)
+                VALUES (?, ?, 8, 10, ?, ?)""",
+                (exam_id, student_id, "2026-10-16T11:30:00", "2026-10-16T12:00:00"),
+            )
+
+        with self.client.session_transaction() as session:
+            session["user_id"] = teacher_id
+
+        try:
+            dashboard = self.client.get("/dashboard").get_data(as_text=True)
+            rankings = self.client.get("/rankings").get_data(as_text=True)
+            analytics = self.client.get("/analytics").get_data(as_text=True)
+            report = self.client.get("/reports/results.csv").get_data(as_text=True)
+
+            for output in (dashboard, rankings, report):
+                self.assertIn("Assigned Student", output)
+                self.assertNotIn("Wrong Class Student", output)
+                self.assertNotIn("Wrong Subject Student", output)
+            self.assertIn("1", analytics)
+            self.assertNotIn("Wrong Class Student", analytics)
+            self.assertNotIn("Wrong Subject Student", analytics)
+        finally:
+            assessment_app.execute(
+                "DELETE FROM attempts WHERE student_id IN (SELECT id FROM users WHERE username LIKE 'scope.student.%')"
+            )
+            assessment_app.execute(
+                "DELETE FROM teacher_class_assignments WHERE teacher_id = ?",
+                (teacher_id,),
+            )
+            assessment_app.execute(
+                "DELETE FROM exams WHERE created_by = ?",
+                (teacher_id,),
+            )
+            assessment_app.execute(
+                "DELETE FROM users WHERE username = ? OR username IN (?, ?, ?)",
+                ( "scope.teacher", *inserted_usernames),
+            )
 
 
 if __name__ == "__main__":

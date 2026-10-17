@@ -1,9 +1,11 @@
 import type {
   ImageStore,
   NewSubmission,
+  PortalAdmin,
   PortalStore,
   RateLimitRecord,
   Submission,
+  TeacherAccount,
   Teacher,
 } from "./portal-store.js";
 
@@ -90,6 +92,40 @@ export class D1PortalStore implements PortalStore {
     await this.db.prepare("DELETE FROM sessions WHERE teacher_id = ?").bind(Number(teacherId)).run();
   }
 
+  async findAdminForLogin(username: string) {
+    return this.db.prepare(
+      "SELECT username, full_name, password_hash FROM portal_admins WHERE username = ? AND active = 1",
+    ).bind(username).first<PortalAdmin & { password_hash: string }>();
+  }
+
+  async findAdminForSession(tokenHash: string, now: number) {
+    return this.db.prepare(
+      `SELECT a.username, a.full_name FROM portal_admin_sessions s
+       JOIN portal_admins a ON a.username = s.username
+       WHERE s.token_hash = ? AND s.expires_at > ? AND a.active = 1`,
+    ).bind(tokenHash, now).first<PortalAdmin>();
+  }
+
+  async saveAdmin(input: PortalAdmin & { password_hash: string }) {
+    await this.db.prepare(
+      `INSERT INTO portal_admins(username, full_name, password_hash, active)
+       VALUES (?, ?, ?, 1)
+       ON CONFLICT(username) DO UPDATE SET full_name = excluded.full_name,
+       password_hash = excluded.password_hash, active = 1`,
+    ).bind(input.username, input.full_name, input.password_hash).run();
+    await this.db.prepare("DELETE FROM portal_admin_sessions WHERE username = ?").bind(input.username).run();
+  }
+
+  async createAdminSession(input: { token_hash: string; username: string; expires_at: number }) {
+    await this.db.prepare(
+      "INSERT INTO portal_admin_sessions(token_hash, username, expires_at) VALUES (?, ?, ?)",
+    ).bind(input.token_hash, input.username, input.expires_at).run();
+  }
+
+  async deleteAdminSession(tokenHash: string) {
+    await this.db.prepare("DELETE FROM portal_admin_sessions WHERE token_hash = ?").bind(tokenHash).run();
+  }
+
   async createSubmission(submission: NewSubmission, _imageUploadKey?: string) {
     await this.db.prepare(
       `INSERT INTO question_submissions
@@ -158,6 +194,41 @@ export class D1PortalStore implements PortalStore {
     return result.results.map((item) => ({ ...item, teacher_id: String(item.teacher_id), image: Boolean(item.image) }));
   }
 
+  async listAdminSubmissions(status: Submission["status"] | "all") {
+    const submissions: Submission[] = [];
+    let cursor = "";
+    while (true) {
+      const where = status === "all" ? "" : "AND s.status = ?";
+      const statement = this.db.prepare(
+        `SELECT s.*, t.full_name AS teacher_name, t.username AS teacher_username
+         FROM question_submissions s JOIN teachers t ON t.id = s.teacher_id
+         WHERE s.id > ? ${where}
+         ORDER BY s.id LIMIT 100`,
+      );
+      const result = status === "all"
+        ? await statement.bind(cursor).all<Submission & { teacher_id: number }>()
+        : await statement.bind(cursor, status).all<Submission & { teacher_id: number }>();
+      const page = result.results.map((item) => ({ ...item, teacher_id: String(item.teacher_id) }));
+      submissions.push(...page);
+      if (page.length < 100) break;
+      cursor = page[page.length - 1].id;
+    }
+    return submissions.sort((left, right) =>
+      Number(right.status === "pending") - Number(left.status === "pending") ||
+      right.submitted_at.localeCompare(left.submitted_at),
+    );
+  }
+
+  async listReviewedSubmissions(cursor: string) {
+    const result = await this.db.prepare(
+      `SELECT s.*, t.full_name AS teacher_name, t.username AS teacher_username
+       FROM question_submissions s JOIN teachers t ON t.id = s.teacher_id
+       WHERE s.status IN ('approved', 'rejected') AND s.id > ?
+       ORDER BY s.id LIMIT 101`,
+    ).bind(cursor).all<Submission & { teacher_id: number }>();
+    return result.results.map((item) => ({ ...item, teacher_id: String(item.teacher_id) }));
+  }
+
   async applyDecision(
     id: string,
     status: "approved" | "rejected",
@@ -184,6 +255,32 @@ export class D1PortalStore implements PortalStore {
   async setTeacherActive(teacherId: string, active: boolean) {
     await this.db.prepare("UPDATE teachers SET active = ? WHERE id = ?")
       .bind(Number(active), Number(teacherId)).run();
+  }
+
+  async listTeacherAccounts() {
+    const result = await this.db.prepare(
+      "SELECT username, full_name, password_hash, active FROM teachers ORDER BY username",
+    ).all<{ username: string; full_name: string; password_hash: string; active: number }>();
+    return result.results.map((item) => ({ ...item, active: Boolean(item.active) }));
+  }
+
+  async upsertTeacherAccount(account: TeacherAccount) {
+    const current = await this.db.prepare(
+      "SELECT id, password_hash, active FROM teachers WHERE username = ?",
+    ).bind(account.username).first<{ id: number; password_hash: string; active: number }>();
+    if (
+      current &&
+      (current.password_hash !== account.password_hash ||
+        Boolean(current.active) !== account.active)
+    ) {
+      await this.deleteTeacherSessions(String(current.id));
+    }
+    await this.db.prepare(
+      `INSERT INTO teachers(username, full_name, password_hash, active, created_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(username) DO UPDATE SET full_name = excluded.full_name,
+       password_hash = excluded.password_hash, active = excluded.active`,
+    ).bind(account.username, account.full_name, account.password_hash, Number(account.active), new Date().toISOString()).run();
   }
 }
 

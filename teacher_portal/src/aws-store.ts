@@ -7,6 +7,7 @@ import {
   GetCommand,
   PutCommand,
   QueryCommand,
+  ScanCommand,
   TransactWriteCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
@@ -25,6 +26,7 @@ import type {
   RateLimitRecord,
   Submission,
   Teacher,
+  TeacherAccount,
 } from "./portal-store.js";
 
 type AwsPortalConfig = {
@@ -153,7 +155,7 @@ export class DynamoPortalStore implements PortalStore {
       ConsistentRead: true,
     }));
     const item = result.Item;
-    if (!item?.active) return null;
+    if (!item?.active || item.account_type === "admin") return null;
     return {
       id: String(item.id),
       username: String(item.username),
@@ -233,6 +235,71 @@ export class DynamoPortalStore implements PortalStore {
       }
       lastKey = page.LastEvaluatedKey;
     } while (lastKey);
+  }
+
+  async findAdminForLogin(username: string) {
+    const result = await dynamo.send(new GetCommand({
+      TableName: config.teachersTable,
+      Key: { username: `admin#${username}` },
+      ConsistentRead: true,
+    }));
+    const item = result.Item;
+    if (!item?.active || item.account_type !== "admin") return null;
+    return { username: String(item.login_username), full_name: String(item.full_name), password_hash: String(item.password_hash) };
+  }
+
+  async findAdminForSession(tokenHash: string, now: number) {
+    const session = await dynamo.send(new GetCommand({
+      TableName: config.sessionsTable,
+      Key: { token_hash: tokenHash },
+      ConsistentRead: true,
+    }));
+    if (
+      !session.Item ||
+      session.Item.actor_type !== "admin" ||
+      Number(session.Item.expires_at) <= now ||
+      typeof session.Item.teacher_id !== "string"
+    ) return null;
+    const username = String(session.Item.teacher_id).replace(/^admin:/, "");
+    const result = await dynamo.send(new GetCommand({
+      TableName: config.teachersTable,
+      Key: { username: `admin#${username}` },
+      ConsistentRead: true,
+    }));
+    if (!result.Item?.active || result.Item.account_type !== "admin") return null;
+    return { username: String(result.Item.login_username), full_name: String(result.Item.full_name) };
+  }
+
+  async saveAdmin(input: { username: string; full_name: string; password_hash: string }) {
+    await this.deleteTeacherSessions(`admin:${input.username}`);
+    await dynamo.send(new PutCommand({
+      TableName: config.teachersTable,
+      Item: {
+        username: `admin#${input.username}`,
+        account_type: "admin",
+        login_username: input.username,
+        full_name: input.full_name,
+        password_hash: input.password_hash,
+        active: true,
+      },
+    }));
+  }
+
+  async createAdminSession(input: { token_hash: string; username: string; expires_at: number }) {
+    await dynamo.send(new PutCommand({
+      TableName: config.sessionsTable,
+      Item: {
+        token_hash: input.token_hash,
+        teacher_id: `admin:${input.username}`,
+        actor_type: "admin",
+        expires_at: input.expires_at,
+      },
+      ConditionExpression: "attribute_not_exists(token_hash)",
+    }));
+  }
+
+  async deleteAdminSession(tokenHash: string) {
+    await this.deleteSession(tokenHash);
   }
 
   async createSubmission(submission: NewSubmission, imageUploadKey?: string) {
@@ -355,6 +422,92 @@ export class DynamoPortalStore implements PortalStore {
     }));
   }
 
+  async listAdminSubmissions(status: Submission["status"] | "all") {
+    let lastKey: Record<string, unknown> | undefined;
+    const items = [];
+    do {
+      const result = status === "all"
+        ? await dynamo.send(new ScanCommand({
+            TableName: config.submissionsTable,
+            ExclusiveStartKey: lastKey,
+          }))
+        : await dynamo.send(new QueryCommand({
+            TableName: config.submissionsTable,
+            IndexName: "PendingSubmissionsIndex",
+            KeyConditionExpression: "#status = :status",
+            ExpressionAttributeNames: { "#status": "status" },
+            ExpressionAttributeValues: { ":status": status },
+            ScanIndexForward: false,
+            ExclusiveStartKey: lastKey,
+          }));
+      items.push(...(result.Items ?? []));
+      lastKey = result.LastEvaluatedKey;
+    } while (lastKey);
+    return items.map((item) => ({
+      ...item,
+      id: String(item.id),
+      teacher_id: String(item.teacher_id),
+      teacher_name: String(item.teacher_name),
+      teacher_username: String(item.teacher_username),
+      subject: String(item.subject),
+      topic: String(item.topic),
+      class_name: String(item.class_name ?? ""),
+      stem: String(item.stem),
+      option_a: String(item.option_a),
+      option_b: String(item.option_b),
+      option_c: String(item.option_c),
+      option_d: String(item.option_d),
+      correct_option: String(item.correct_option),
+      difficulty: String(item.difficulty),
+      explanation: String(item.explanation ?? ""),
+      standard: String(item.standard ?? ""),
+      image_key: item.image_key ? String(item.image_key) : null,
+      status: String(item.status) as Submission["status"],
+      feedback: String(item.feedback ?? ""),
+      submitted_at: String(item.submitted_at),
+    })) as Submission[];
+  }
+
+  async listReviewedSubmissions(cursor: string) {
+    const results = await Promise.all((["approved", "rejected"] as const).map((status) =>
+      dynamo.send(new QueryCommand({
+        TableName: config.submissionsTable,
+        IndexName: "PendingSubmissionsIndex",
+        KeyConditionExpression: cursor
+          ? "#status = :status AND id > :cursor"
+          : "#status = :status",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: cursor
+          ? { ":status": status, ":cursor": cursor }
+          : { ":status": status },
+        ScanIndexForward: true,
+        Limit: 101,
+      }))));
+    return results.flatMap((result) => result.Items ?? []).map((item) => ({
+      id: String(item.id),
+      teacher_id: String(item.teacher_id),
+      teacher_name: String(item.teacher_name),
+      teacher_username: String(item.teacher_username),
+      subject: String(item.subject),
+      topic: String(item.topic),
+      class_name: String(item.class_name ?? ""),
+      stem: String(item.stem),
+      option_a: String(item.option_a),
+      option_b: String(item.option_b),
+      option_c: String(item.option_c),
+      option_d: String(item.option_d),
+      correct_option: String(item.correct_option),
+      difficulty: String(item.difficulty),
+      explanation: String(item.explanation ?? ""),
+      standard: String(item.standard ?? ""),
+      image_key: item.image_key ? String(item.image_key) : null,
+      status: String(item.status) as Submission["status"],
+      feedback: String(item.feedback ?? ""),
+      submitted_at: String(item.submitted_at),
+      decided_at: String(item.decided_at ?? ""),
+    })).sort((left, right) => left.id.localeCompare(right.id));
+  }
+
   async applyDecision(
     id: string,
     status: "approved" | "rejected",
@@ -404,6 +557,55 @@ export class DynamoPortalStore implements PortalStore {
       UpdateExpression: "SET active = :active",
       ExpressionAttributeValues: { ":active": active },
       ConditionExpression: "attribute_exists(username)",
+    }));
+  }
+
+  async listTeacherAccounts() {
+    let lastKey: Record<string, unknown> | undefined;
+    const accounts: TeacherAccount[] = [];
+    do {
+      const page = await dynamo.send(new ScanCommand({
+        TableName: config.teachersTable,
+        ExclusiveStartKey: lastKey,
+      }));
+      for (const item of page.Items ?? []) {
+        if (item.account_type === "admin" || !item.username) continue;
+        accounts.push({
+          username: String(item.username),
+          full_name: String(item.full_name),
+          password_hash: String(item.password_hash),
+          active: Boolean(item.active),
+        });
+      }
+      lastKey = page.LastEvaluatedKey;
+    } while (lastKey);
+    return accounts;
+  }
+
+  async upsertTeacherAccount(account: TeacherAccount) {
+    const current = await dynamo.send(new GetCommand({
+      TableName: config.teachersTable,
+      Key: { username: account.username },
+      ConsistentRead: true,
+    }));
+    if (
+      current.Item &&
+      (String(current.Item.password_hash) !== account.password_hash ||
+        Boolean(current.Item.active) !== account.active)
+    ) {
+      await this.deleteTeacherSessions(account.username);
+    }
+    await dynamo.send(new PutCommand({
+      TableName: config.teachersTable,
+      Item: {
+        username: account.username,
+        id: account.username,
+        full_name: account.full_name,
+        password_hash: account.password_hash,
+        active: account.active,
+        account_type: "teacher",
+        created_at: new Date().toISOString(),
+      },
     }));
   }
 }

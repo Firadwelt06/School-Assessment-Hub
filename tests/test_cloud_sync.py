@@ -13,6 +13,7 @@ from cloud_sync import (
     PortalSyncError,
     _PortalRedirectHandler,
     portal_request,
+    sync_teacher_accounts,
     sync_question_submissions,
 )
 
@@ -38,7 +39,34 @@ class CloudSyncTests(unittest.TestCase):
                 option_b TEXT NOT NULL, option_c TEXT NOT NULL, option_d TEXT NOT NULL,
                 correct_option TEXT NOT NULL, difficulty TEXT NOT NULL, explanation TEXT NOT NULL,
                 standard TEXT NOT NULL, status TEXT NOT NULL, feedback TEXT NOT NULL,
-                submitted_at TEXT NOT NULL, decision_synced INTEGER NOT NULL DEFAULT 0)"""
+                submitted_at TEXT NOT NULL, reviewed_at TEXT NOT NULL DEFAULT '',
+                decision_synced INTEGER NOT NULL DEFAULT 0)"""
+            )
+            connection.executescript(
+                """
+                CREATE TABLE users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE,
+                    full_name TEXT, password_hash TEXT, role TEXT,
+                    class_name TEXT DEFAULT '', subjects TEXT DEFAULT '',
+                    active INTEGER DEFAULT 1, created_at TEXT
+                );
+                CREATE TABLE teacher_sync_state (
+                    username TEXT PRIMARY KEY, synced_fingerprint TEXT NOT NULL
+                );
+                CREATE TABLE teacher_sync_conflicts (
+                    username TEXT PRIMARY KEY, detected_at TEXT NOT NULL
+                );
+                CREATE TABLE questions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, subject TEXT, topic TEXT,
+                    class_name TEXT, image_path TEXT, stem TEXT, option_a TEXT,
+                    option_b TEXT, option_c TEXT, option_d TEXT, correct_option TEXT,
+                    difficulty TEXT, explanation TEXT, standard TEXT, created_by INTEGER,
+                    created_at TEXT
+                );
+                """
+            )
+            connection.execute(
+                "INSERT INTO users(username, full_name, password_hash, role, active) VALUES ('admin', 'Admin', 'hash', 'admin', 1)"
             )
             connection.commit()
 
@@ -139,6 +167,8 @@ class CloudSyncTests(unittest.TestCase):
         def portal_request(path, **kwargs):
             if path.startswith("/api/sync/pending"):
                 return {"submissions": [self.submission()], "next_cursor": ""}
+            if path.startswith("/api/sync/reviewed"):
+                return {"submissions": [], "next_cursor": ""}
             if path.endswith("/image"):
                 return b"\x89PNG\r\n\x1a\nimage", "image/png"
             raise AssertionError(f"Unexpected portal request: {path}")
@@ -176,6 +206,8 @@ class CloudSyncTests(unittest.TestCase):
         def portal_request(path, method="GET", payload=None, **kwargs):
             if path == "/api/sync/pending":
                 return {"submissions": [], "next_cursor": ""}
+            if path == "/api/sync/reviewed":
+                return {"submissions": [], "next_cursor": ""}
             if path == "/api/sync/decisions":
                 self.assertEqual(payload["decisions"][0]["id"], REMOTE_ID)
                 return {"synced_ids": [REMOTE_ID], "conflicts": []}
@@ -191,6 +223,172 @@ class CloudSyncTests(unittest.TestCase):
                 (REMOTE_ID,),
             ).fetchone()[0]
         self.assertEqual(synced, 1)
+
+    def test_teacher_sync_pushes_local_account_and_records_baseline(self):
+        account = {
+            "username": "ada.teacher",
+            "full_name": "Ada Teacher",
+            "password_hash": "a" * 32 + "$" + "b" * 64,
+            "active": True,
+        }
+        with closing(self.connect()) as connection:
+            connection.execute(
+                "INSERT INTO users(username, full_name, password_hash, role, active) VALUES (?, ?, ?, 'teacher', 1)",
+                (account["username"], account["full_name"], account["password_hash"]),
+            )
+            connection.commit()
+        calls = []
+
+        def portal_request(path, method="GET", payload=None, **kwargs):
+            calls.append((path, method, payload))
+            if path == "/api/sync/teachers":
+                return {"teachers": []}
+            if path == "/api/sync/teachers/upsert":
+                return {"ok": True}
+            raise AssertionError(f"Unexpected portal request: {path}")
+
+        with patch("cloud_sync.portal_request", side_effect=portal_request):
+            result = sync_teacher_accounts("sqlite", self.connect)
+
+        self.assertEqual(result, {"imported": 0, "pushed": 1, "conflicts": []})
+        self.assertEqual(calls[0][0], "/api/sync/teachers")
+        self.assertEqual(calls[1][2], account)
+        with closing(self.connect()) as connection:
+            baseline = connection.execute(
+                "SELECT synced_fingerprint FROM teacher_sync_state WHERE username = ?",
+                (account["username"],),
+            ).fetchone()
+        self.assertIsNotNone(baseline)
+
+    def test_teacher_sync_imports_portal_account_hash(self):
+        account = {
+            "username": "binta.teacher",
+            "full_name": "Binta Teacher",
+            "password_hash": "pbkdf2$100000$" + "a" * 32 + "$" + "b" * 64,
+            "active": True,
+        }
+        with patch("cloud_sync.portal_request", return_value={"teachers": [account]}):
+            result = sync_teacher_accounts("sqlite", self.connect)
+
+        self.assertEqual(result, {"imported": 1, "pushed": 0, "conflicts": []})
+        with closing(self.connect()) as connection:
+            teacher = connection.execute(
+                "SELECT full_name, password_hash, role FROM users WHERE username = ?",
+                (account["username"],),
+            ).fetchone()
+        self.assertEqual(tuple(teacher), (account["full_name"], account["password_hash"], "teacher"))
+
+    def test_teacher_sync_flags_two_sided_account_conflicts(self):
+        username = "chika.teacher"
+        local = {
+            "username": username,
+            "full_name": "Chika Teacher",
+            "password_hash": "a" * 32 + "$" + "b" * 64,
+            "active": True,
+        }
+        remote = {**local, "password_hash": "c" * 32 + "$" + "d" * 64}
+        with closing(self.connect()) as connection:
+            connection.execute(
+                "INSERT INTO users(username, full_name, password_hash, role, active) VALUES (?, ?, ?, 'teacher', 1)",
+                (username, local["full_name"], local["password_hash"]),
+            )
+            connection.execute(
+                "INSERT INTO teacher_sync_state(username, synced_fingerprint) VALUES (?, ?)",
+                (username, "e" * 64),
+            )
+            connection.commit()
+        with patch("cloud_sync.portal_request", return_value={"teachers": [remote]}):
+            result = sync_teacher_accounts("sqlite", self.connect)
+
+        self.assertEqual(result["conflicts"], [username])
+        with closing(self.connect()) as connection:
+            conflict = connection.execute(
+                "SELECT username FROM teacher_sync_conflicts WHERE username = ?",
+                (username,),
+            ).fetchone()
+        self.assertEqual(conflict["username"], username)
+
+    def reviewed_submission(self, status="approved"):
+        return {
+            **self.submission(),
+            "status": status,
+            "feedback": "Reviewed online.",
+            "decided_at": "2026-10-16T12:00:00Z",
+        }
+
+    def sync_reviewed(self, reviewed):
+        def portal_request(path, method="GET", payload=None, **kwargs):
+            if path == "/api/sync/pending":
+                return {"submissions": [], "next_cursor": ""}
+            if path == "/api/sync/reviewed":
+                return {"submissions": [reviewed], "next_cursor": ""}
+            if path == "/api/sync/decisions":
+                return {"synced_ids": [], "conflicts": []}
+            if path.endswith("/image"):
+                return b"\x89PNG\r\n\x1a\nimage", "image/png"
+            raise AssertionError(f"Unexpected portal request: {path}")
+
+        with patch("cloud_sync.portal_request", side_effect=portal_request):
+            return sync_question_submissions("sqlite", self.connect, self.uploads_dir)
+
+    def test_online_approval_imports_submission_and_question_idempotently(self):
+        result = self.sync_reviewed(self.reviewed_submission())
+
+        self.assertEqual(result["online_reviews_applied"], 1)
+        with closing(self.connect()) as connection:
+            submission = connection.execute(
+                "SELECT status, feedback, decision_synced FROM question_submissions WHERE remote_id = ?",
+                (REMOTE_ID,),
+            ).fetchone()
+            questions = connection.execute("SELECT stem, created_by FROM questions").fetchall()
+        self.assertEqual(tuple(submission), ("approved", "Reviewed online.", 1))
+        self.assertEqual(len(questions), 1)
+        self.assertEqual(questions[0]["stem"], "Which part absorbs water?")
+        self.assertEqual(questions[0]["created_by"], 1)
+
+        repeated = self.sync_reviewed(self.reviewed_submission())
+        self.assertEqual(repeated["online_reviews_applied"], 0)
+        with closing(self.connect()) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM questions").fetchone()[0], 1)
+
+    def test_online_rejection_imports_feedback_without_creating_question(self):
+        result = self.sync_reviewed(self.reviewed_submission("rejected"))
+
+        self.assertEqual(result["online_reviews_applied"], 1)
+        with closing(self.connect()) as connection:
+            submission = connection.execute(
+                "SELECT status, feedback FROM question_submissions WHERE remote_id = ?",
+                (REMOTE_ID,),
+            ).fetchone()
+            question_count = connection.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
+        self.assertEqual(tuple(submission), ("rejected", "Reviewed online."))
+        self.assertEqual(question_count, 0)
+
+    def test_online_review_conflicting_with_local_decision_is_not_applied(self):
+        with closing(self.connect()) as connection:
+            connection.execute(
+                """INSERT INTO question_submissions
+                (remote_id, teacher_name, teacher_username, subject, topic, class_name, image_path,
+                 stem, option_a, option_b, option_c, option_d, correct_option, difficulty,
+                 explanation, standard, status, feedback, submitted_at)
+                VALUES (?, 'Ada Teacher', 'ada.teacher', 'Science', 'Plants', 'SS1', '',
+                'Question', 'A', 'B', 'C', 'D', 'A', 'easy', '', '', 'rejected',
+                'Local decision', '2026-10-15T12:00:00Z')""",
+                (REMOTE_ID,),
+            )
+            connection.commit()
+
+        result = self.sync_reviewed(self.reviewed_submission("approved"))
+
+        self.assertEqual(result["online_review_conflicts"], 1)
+        with closing(self.connect()) as connection:
+            submission = connection.execute(
+                "SELECT status, feedback FROM question_submissions WHERE remote_id = ?",
+                (REMOTE_ID,),
+            ).fetchone()
+            question_count = connection.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
+        self.assertEqual(tuple(submission), ("rejected", "Local decision"))
+        self.assertEqual(question_count, 0)
 
 
 if __name__ == "__main__":

@@ -49,3 +49,23 @@ test("AWS HTTP API adapter requires a teacher session before preparing image upl
   assert.equal(response.statusCode, 401);
   assert.deepEqual(JSON.parse(response.body), { error: "Sign in again before uploading an image." });
 });
+
+test("AWS portal exposes a downloadable no-image batch template", async () => {
+  const response = await handler(event("/batch-template.json"));
+  assert.equal(response.statusCode, 200);
+  assert.match(response.headers["content-type"], /application\/json/);
+  assert.match(response.headers["content-disposition"], /teacher-question-batch-template\.json/);
+  assert.equal(JSON.parse(response.body).questions.length, 1);
+});
+
+test("online review dashboard requires its separate administrator session", async () => {
+  const response = await handler(event("/admin"));
+  assert.equal(response.statusCode, 303);
+  assert.equal(response.headers.location, "/admin/login");
+});
+
+test("teacher account sync APIs reject requests without the sync token", async () => {
+  const response = await handler(event("/api/sync/teachers"));
+  assert.equal(response.statusCode, 401);
+  assert.deepEqual(JSON.parse(response.body), { error: "Unauthorized." });
+});

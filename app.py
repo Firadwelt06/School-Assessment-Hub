@@ -18,8 +18,11 @@ from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
 from cloud_sync import (
     PortalSyncError,
-    reset_portal_teacher_password as send_portal_teacher_password_reset,
+    resolve_teacher_account_conflict,
+    set_portal_admin as provision_portal_admin,
+    set_portal_teacher_password_hash as send_portal_teacher_password_hash,
     set_portal_teacher_active as send_portal_teacher_status,
+    sync_teacher_accounts,
     sync_question_submissions,
 )
 
@@ -234,17 +237,25 @@ def upsert_setting(key, value):
 
 
 def hash_password(password):
-    salt = secrets.token_hex(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 120_000).hex()
-    return f"{salt}${digest}"
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 100_000).hex()
+    return f"pbkdf2$100000${salt.hex()}${digest}"
 
 
 def check_password(password, stored):
     try:
+        if stored.startswith("pbkdf2$"):
+            algorithm, iterations, salt, digest = stored.split("$", 3)
+            if algorithm != "pbkdf2" or int(iterations) != 100_000:
+                return False
+            candidate = hashlib.pbkdf2_hmac(
+                "sha256", password.encode(), bytes.fromhex(salt), int(iterations)
+            ).hex()
+            return secrets.compare_digest(candidate, digest)
         salt, digest = stored.split("$", 1)
         candidate = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 120_000).hex()
         return secrets.compare_digest(candidate, digest)
-    except ValueError:
+    except (ValueError, TypeError):
         return False
 
 
@@ -309,6 +320,16 @@ def init_mysql_db():
             role ENUM('teacher', 'student') NOT NULL DEFAULT 'student', code VARCHAR(100) NOT NULL,
             expires_at VARCHAR(40) NOT NULL, active TINYINT NOT NULL DEFAULT 1,
             created_by INT NOT NULL, created_at VARCHAR(40) NOT NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+        """CREATE TABLE IF NOT EXISTS teacher_class_assignments (
+            teacher_id INT NOT NULL, class_name VARCHAR(255) NOT NULL,
+            PRIMARY KEY (teacher_id, class_name)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+        """CREATE TABLE IF NOT EXISTS teacher_sync_state (
+            username VARCHAR(255) PRIMARY KEY, synced_fingerprint CHAR(64) NOT NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+        """CREATE TABLE IF NOT EXISTS teacher_sync_conflicts (
+            username VARCHAR(255) PRIMARY KEY, detected_at VARCHAR(40) NOT NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
     ]
     try:
@@ -407,6 +428,16 @@ def init_db():
             role TEXT NOT NULL DEFAULT 'student' CHECK(role IN ('teacher', 'student')),
             code TEXT NOT NULL, expires_at TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
             created_by INTEGER NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS teacher_class_assignments (
+            teacher_id INTEGER NOT NULL, class_name TEXT NOT NULL,
+            PRIMARY KEY (teacher_id, class_name)
+        );
+        CREATE TABLE IF NOT EXISTS teacher_sync_state (
+            username TEXT PRIMARY KEY, synced_fingerprint TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS teacher_sync_conflicts (
+            username TEXT PRIMARY KEY, detected_at TEXT NOT NULL
         );
         """
     )
@@ -620,6 +651,19 @@ def format_person_name(value):
             word = "".join(part.capitalize() if part not in {"-", "'", "\u2019"} else part for part in parts)
         formatted_words.append(word)
     return " ".join(formatted_words)
+
+
+def teacher_classes(user=None):
+    user = user or current_user()
+    if not user or user["role"] != "teacher":
+        return []
+    return [
+        row["class_name"]
+        for row in query(
+            "SELECT class_name FROM teacher_class_assignments WHERE teacher_id = ? ORDER BY class_name",
+            (user["id"],),
+        )
+    ]
 
 
 def teacher_username(full_name):
@@ -836,7 +880,11 @@ def ranking_tables():
     user = current_user()
     if user and user["role"] == "teacher":
         allowed = teacher_subjects(user)
-        rows = [row for row in rows if row["subject"] in allowed]
+        assigned_classes = set(teacher_classes(user))
+        rows = [
+            row for row in rows
+            if row["subject"] in allowed and row["class_name"] in assigned_classes
+        ]
     if class_filter:
         rows = [row for row in rows if row["class_name"] == class_filter or row["class_group"] == class_filter]
     if subject_filter:
@@ -975,6 +1023,22 @@ def dashboard():
         "exams": query("SELECT COUNT(*) AS count FROM exams", one=True)["count"],
         "attempts": query("SELECT COUNT(*) AS count FROM attempts", one=True)["count"],
     }
+    if user["role"] == "teacher":
+        assigned_subjects = teacher_subjects(user)
+        assigned_classes = teacher_classes(user)
+        if assigned_subjects and assigned_classes:
+            stats["attempts"] = query(
+                """SELECT COUNT(*) AS count FROM attempts a
+                JOIN users u ON u.id = a.student_id
+                JOIN exams e ON e.id = a.exam_id
+                WHERE u.role = 'student'
+                AND e.subject IN (""" + ",".join("?" for _ in assigned_subjects) + """)
+                AND u.class_name IN (""" + ",".join("?" for _ in assigned_classes) + ")",
+                [*assigned_subjects, *assigned_classes],
+                one=True,
+            )["count"]
+        else:
+            stats["attempts"] = 0
     subject_filter = request.args.get("subject", "").strip()
     class_filter = request.args.get("class_name", "").strip()
     exam_type_filter = request.args.get("exam_type", "").strip()
@@ -1015,17 +1079,19 @@ def dashboard():
         attempt_params = []
         if user["role"] == "teacher":
             subjects = teacher_subjects(user)
-            if subjects:
+            assigned_classes = teacher_classes(user)
+            if subjects and assigned_classes:
                 attempt_sql += " AND e.subject IN (" + ",".join("?" for _ in subjects) + ")"
-                attempt_params.extend(subjects)
+                attempt_sql += " AND u.class_name IN (" + ",".join("?" for _ in assigned_classes) + ")"
+                attempt_params.extend([*subjects, *assigned_classes])
             else:
-                attempt_sql += " AND e.created_by = ?"
-                attempt_params.append(user["id"])
-        attempt_sql += " ORDER BY a.started_at DESC LIMIT 25"
-        recent_attempts = [
-            {**dict(attempt), "status": attempt_status(attempt)}
-            for attempt in query(attempt_sql, attempt_params)
-        ]
+                attempt_sql = ""
+        if attempt_sql:
+            attempt_sql += " ORDER BY a.started_at DESC LIMIT 25"
+            recent_attempts = [
+                {**dict(attempt), "status": attempt_status(attempt)}
+                for attempt in query(attempt_sql, attempt_params)
+            ]
     subjects = [row["subject"] for row in query("SELECT DISTINCT subject FROM exams ORDER BY subject")]
     classes = class_options()
     return render_template(
@@ -1394,6 +1460,45 @@ def update_user_status(user_id):
     return redirect(url_for("admin"))
 
 
+@app.post("/admin/users/<int:user_id>/classes")
+@login_required("admin")
+def update_teacher_classes(user_id):
+    teacher = query("SELECT id FROM users WHERE id = ? AND role = 'teacher'", (user_id,), one=True)
+    selected = list(dict.fromkeys(request.form.getlist("class_names")))
+    allowed = set(class_options())
+    if not teacher:
+        flash("Teacher account not found.", "error")
+        return redirect(url_for("admin", role="teacher", _anchor="users"))
+    if any(class_name not in allowed for class_name in selected):
+        flash("Choose only classes configured by the school administrator.", "error")
+        return redirect(url_for("admin", role="teacher", _anchor="users"))
+    connection = db()
+    try:
+        if DB_ENGINE == "mysql":
+            connection.begin()
+        else:
+            connection.execute("BEGIN IMMEDIATE")
+        execute_on_connection(
+            connection,
+            "DELETE FROM teacher_class_assignments WHERE teacher_id = ?",
+            (user_id,),
+        )
+        for class_name in selected:
+            execute_on_connection(
+                connection,
+                "INSERT INTO teacher_class_assignments(teacher_id, class_name) VALUES (?, ?)",
+                (user_id, class_name),
+            )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    flash(f"Saved {len(selected)} assigned class(es) for the teacher.", "success")
+    return redirect(url_for("admin", role="teacher", _anchor="users"))
+
+
 @app.post("/admin/users/<int:user_id>/remove")
 @login_required("admin")
 def remove_user(user_id):
@@ -1679,10 +1784,13 @@ def grant_rewrite(attempt_id):
 def rankings():
     subject_rows, overall_rows = ranking_tables()
     class_values = [row["class_name"] for row in query("SELECT DISTINCT class_name FROM users WHERE role='student' AND class_name != ''")]
+    user = current_user()
+    if user["role"] == "teacher":
+        class_values = [name for name in class_values if name in teacher_classes(user)]
     return render_template(
         "rankings.html", subject_rows=subject_rows, overall_rows=overall_rows,
         classes=sorted(set(class_values + [class_group(value) for value in class_values])),
-        subjects=[row["subject"] for row in query("SELECT DISTINCT subject FROM exams ORDER BY subject")],
+        subjects=teacher_subjects(user) if user["role"] == "teacher" else [row["subject"] for row in query("SELECT DISTINCT subject FROM exams ORDER BY subject")],
         exam_types=EXAM_TYPES, exam_type_filter=request.args.get("exam_type", ""),
         ranking_scope=request.args.get("scope", "all"),
         class_filter=request.args.get("class_name", ""), subject_filter=request.args.get("subject", ""),
@@ -1706,7 +1814,11 @@ def analytics():
     records = [dict(row) for row in rows]
     user = current_user()
     if user["role"] == "teacher":
-        records = [row for row in records if row["subject"] in teacher_subjects(user)]
+        assigned_classes = set(teacher_classes(user))
+        records = [
+            row for row in records
+            if row["subject"] in teacher_subjects(user) and row["class_name"] in assigned_classes
+        ]
     if class_filter:
         records = [row for row in records if class_matches(row["class_name"], class_filter)]
     if subject_filter:
@@ -1741,7 +1853,11 @@ def analytics():
         "analytics.html",
         class_chart=class_chart, subject_chart=subject_chart,
         type_chart=type_chart, distribution=distribution, stats=stats,
-        classes=sorted(set([row["class_name"] for row in query("SELECT DISTINCT class_name FROM users WHERE role='student' AND class_name != ''")] + class_group_options())),
+        classes=(
+            teacher_classes(user)
+            if user["role"] == "teacher"
+            else sorted(set([row["class_name"] for row in query("SELECT DISTINCT class_name FROM users WHERE role='student' AND class_name != ''")] + class_group_options()))
+        ),
         subjects=teacher_subjects(user) if user["role"] == "teacher" else category_values("managed_subjects", "SELECT DISTINCT subject AS value FROM questions ORDER BY subject"),
         exam_types=EXAM_TYPES, class_filter=class_filter,
         subject_filter=subject_filter, exam_type_filter=exam_type_filter,
@@ -1764,7 +1880,12 @@ def results_csv():
     )
     records = [dict(row) for row in rows]
     if current_user()["role"] == "teacher":
-        records = [row for row in records if row["subject"] in teacher_subjects()]
+        allowed_subjects = set(teacher_subjects())
+        allowed_classes = set(teacher_classes())
+        records = [
+            row for row in records
+            if row["subject"] in allowed_subjects and row["class_name"] in allowed_classes
+        ]
     if class_filter:
         records = [row for row in records if row["class_name"] == class_filter or class_group(row["class_name"]) == class_filter]
         if any(row["class_name"] != class_filter for row in records):
@@ -1910,16 +2031,26 @@ def admin():
                     frame = pd.read_csv(upload).fillna("")
                     required = {"full_name", "password"}
                     if not required.issubset(frame.columns):
-                        raise ValueError("Teacher CSV columns must include full_name and password. username and class_name are optional.")
+                        raise ValueError("Teacher CSV columns must include full_name and password. username, subjects, and classes are optional.")
                     names = [format_person_name(str(row["full_name"])) for row in frame.to_dict("records")]
                     created = 0
                     for row, full_name in zip(frame.to_dict("records"), names):
                         username = str(row.get("username", "")).strip() or re.sub(r"[^a-z0-9]+", ".", full_name.lower()).strip(".")
-                        execute(
+                        assigned_classes = list(dict.fromkeys(
+                            value.strip() for value in str(row.get("classes", "")).split("|") if value.strip()
+                        ))
+                        if any(value not in set(class_options()) for value in assigned_classes):
+                            raise ValueError(f"Teacher {username} has a class not configured in school settings.")
+                        teacher_id = execute(
                             """INSERT INTO users(username, full_name, password_hash, role, class_name, subjects, created_at)
                             VALUES (?, ?, ?, 'teacher', ?, ?, ?)""",
                             (username, full_name, hash_password(str(row["password"])), "", str(row.get("subjects", "")).strip(), datetime.now().isoformat(timespec="seconds")),
                         )
+                        for class_name in assigned_classes:
+                            execute(
+                                "INSERT INTO teacher_class_assignments(teacher_id, class_name) VALUES (?, ?)",
+                                (teacher_id, class_name),
+                            )
                         created += 1
                     flash(f"Imported {created} teachers.", "success")
                 except (ValueError, KeyError) as error:
@@ -1989,6 +2120,9 @@ def admin():
                     "DELETE FROM questions",
                     "DELETE FROM question_submissions",
                     "DELETE FROM subject_access_codes",
+                    "DELETE FROM teacher_class_assignments",
+                    "DELETE FROM teacher_sync_state",
+                    "DELETE FROM teacher_sync_conflicts",
                     "DELETE FROM users WHERE id != ?",
                     "DELETE FROM settings",
                 ]
@@ -2007,6 +2141,9 @@ def admin():
                         DELETE FROM questions;
                         DELETE FROM question_submissions;
                         DELETE FROM subject_access_codes;
+                        DELETE FROM teacher_class_assignments;
+                        DELETE FROM teacher_sync_state;
+                        DELETE FROM teacher_sync_conflicts;
                         DELETE FROM users WHERE id != %d;
                         DELETE FROM settings;
                         """ % admin_id
@@ -2042,6 +2179,12 @@ def admin():
     exams = query(exam_sql, exam_params)
     if exam_class_filter:
         exams = [exam for exam in exams if class_matches(exam["class_name"], exam_class_filter)]
+    users = query(user_sql, user_params)
+    teacher_class_assignments = {}
+    for assignment in query(
+        "SELECT teacher_id, class_name FROM teacher_class_assignments ORDER BY class_name"
+    ):
+        teacher_class_assignments.setdefault(assignment["teacher_id"], []).append(assignment["class_name"])
     attempts = [
         {**dict(attempt), "status": attempt_status(attempt)}
         for attempt in query(
@@ -2054,7 +2197,8 @@ def admin():
     ]
     return render_template(
         "admin.html",
-        users=query(user_sql, user_params),
+        users=users,
+        teacher_class_assignments=teacher_class_assignments,
         attempts=attempts,
         role_filter=role_filter, class_filter=class_filter,
         exam_subject_filter=exam_subject_filter, exam_class_filter=exam_class_filter,
@@ -2112,6 +2256,9 @@ def admin_question_submissions():
                 "SELECT status, COUNT(*) AS count FROM question_submissions GROUP BY status"
             )
         },
+        teacher_sync_conflicts=query(
+            "SELECT username, detected_at FROM teacher_sync_conflicts ORDER BY detected_at DESC"
+        ),
         portal_configured=bool(
             os.getenv("CLOUD_PORTAL_URL", "").strip()
             and os.getenv("CLOUD_PORTAL_SYNC_TOKEN", "")
@@ -2119,21 +2266,72 @@ def admin_question_submissions():
     )
 
 
+@app.post("/admin/question-submissions/portal-admin")
+@login_required("admin")
+def configure_portal_admin():
+    username = request.form.get("username", "").strip().lower()
+    full_name = request.form.get("full_name", "").strip()
+    password = request.form.get("password", "")
+    if not re.fullmatch(r"[a-z0-9._-]{3,64}", username):
+        flash("Portal admin username must be 3–64 letters, numbers, dots, underscores, or hyphens.", "error")
+    elif len(full_name) < 2 or len(full_name) > 100:
+        flash("Enter a portal admin name between 2 and 100 characters.", "error")
+    elif len(password) < 12 or len(password) > 128:
+        flash("Use a unique portal admin password between 12 and 128 characters.", "error")
+    else:
+        try:
+            provision_portal_admin(username, full_name, password)
+        except PortalSyncError as error:
+            flash(str(error), "error")
+        else:
+            flash(
+                f"Online portal admin account '{username}' is ready. Sign in at the portal URL followed by /admin/login.",
+                "success",
+            )
+    return redirect(url_for("admin_question_submissions"))
+
+
 @app.post("/admin/question-submissions/sync")
 @login_required("admin")
 def sync_admin_question_submissions():
     try:
+        teachers = sync_teacher_accounts(DB_ENGINE, db)
         result = sync_question_submissions(DB_ENGINE, db, UPLOAD_DIR)
     except PortalSyncError as error:
         flash(str(error), "error")
     else:
         message = (
             f"Sync complete: downloaded {result['imported']} new question submission(s), "
-            f"sent {result['decisions_synced']} review decision(s)."
+            f"sent {result['decisions_synced']} review decision(s), "
+            f"applied {result['online_reviews_applied']} online review decision(s), "
+            f"imported {teachers['imported']} teacher account(s), and updated {teachers['pushed']} online account(s)."
         )
+        if result["online_review_conflicts"]:
+            message += f" {result['online_review_conflicts']} online review decision(s) conflict with local decisions."
+        if teachers["conflicts"]:
+            message += " Teacher account conflicts need admin resolution: " + ", ".join(teachers["conflicts"]) + "."
         if result["conflicts"]:
             message += f" {len(result['conflicts'])} decision(s) need attention because the portal status changed."
-        flash(message, "warning" if result["conflicts"] else "success")
+        flash(
+            message,
+            "warning" if result["conflicts"] or teachers["conflicts"] or result["online_review_conflicts"] else "success",
+        )
+    return redirect(url_for("admin_question_submissions"))
+
+
+@app.post("/admin/question-submissions/teacher-conflicts/<username>/resolve")
+@login_required("admin")
+def resolve_portal_teacher_conflict(username):
+    authority = request.form.get("authority", "")
+    if not re.fullmatch(r"[a-z0-9._-]{3,64}", username):
+        flash("Invalid teacher username.", "error")
+    else:
+        try:
+            resolve_teacher_account_conflict(DB_ENGINE, db, username, authority)
+        except PortalSyncError as error:
+            flash(str(error), "error")
+        else:
+            flash(f"Teacher account '{username}' now uses the {authority} version on both systems.", "success")
     return redirect(url_for("admin_question_submissions"))
 
 
@@ -2239,16 +2437,48 @@ def reset_portal_teacher_password():
     elif len(password) < 8 or len(password) > 128:
         flash("Temporary passwords must be 8–128 characters.", "error")
     else:
-        try:
-            send_portal_teacher_password_reset(username, password)
-        except PortalSyncError as error:
-            flash(str(error), "error")
-        else:
-            flash(
-                f"Password reset for {username}. Share the temporary password privately; "
-                "the teacher should change it after signing in.",
-                "success",
-            )
+        teacher = query(
+            "SELECT full_name, password_hash, active FROM users WHERE username = ? AND role = 'teacher'",
+            (username,),
+            one=True,
+        )
+        sync_failed = False
+        if not teacher:
+            try:
+                sync_teacher_accounts(DB_ENGINE, db)
+            except PortalSyncError as error:
+                sync_failed = True
+                flash(str(error), "error")
+            else:
+                teacher = query(
+                    "SELECT full_name, password_hash, active FROM users WHERE username = ? AND role = 'teacher'",
+                    (username,),
+                    one=True,
+                )
+        if teacher:
+            new_hash = hash_password(password)
+            execute("UPDATE users SET password_hash = ? WHERE username = ? AND role = 'teacher'", (new_hash, username))
+            try:
+                send_portal_teacher_password_hash(
+                    username,
+                    teacher["full_name"],
+                    new_hash,
+                    bool(teacher["active"]),
+                )
+            except PortalSyncError as error:
+                flash(
+                    f"Password was reset locally, but the portal update failed: {error}. "
+                    "Run Sync now when the portal is reachable.",
+                    "warning",
+                )
+            else:
+                flash(
+                    f"Password reset for {username} on the local server and online portal. "
+                    "Share the temporary password privately; the teacher should change it after signing in.",
+                    "success",
+                )
+        elif not sync_failed:
+            flash("No synchronized teacher account matches that username.", "error")
     return redirect(url_for("admin_question_submissions"))
 
 

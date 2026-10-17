@@ -4,6 +4,18 @@ export interface Teacher {
   full_name: string;
 }
 
+export interface PortalAdmin {
+  username: string;
+  full_name: string;
+}
+
+export interface TeacherAccount {
+  username: string;
+  full_name: string;
+  password_hash: string;
+  active: boolean;
+}
+
 export interface Submission {
   id: string;
   teacher_id: string;
@@ -74,6 +86,11 @@ export interface PortalStore {
   getTeacherPassword(teacherId: string): Promise<{ password_hash: string } | null>;
   updateTeacherPassword(teacherId: string, passwordHash: string): Promise<void>;
   deleteTeacherSessions(teacherId: string): Promise<void>;
+  findAdminForLogin(username: string): Promise<(PortalAdmin & { password_hash: string }) | null>;
+  findAdminForSession(tokenHash: string, now: number): Promise<PortalAdmin | null>;
+  saveAdmin(input: PortalAdmin & { password_hash: string }): Promise<void>;
+  createAdminSession(input: { token_hash: string; username: string; expires_at: number }): Promise<void>;
+  deleteAdminSession(tokenHash: string): Promise<void>;
   createSubmission(submission: NewSubmission, imageUploadKey?: string): Promise<void>;
   createImageUpload(key: string, teacherId: string, expiresAt: number): Promise<void>;
   ownsImageUpload(key: string, teacherId: string, now: number): Promise<boolean>;
@@ -82,9 +99,13 @@ export interface PortalStore {
   getTeacherSubmissionImageKey(id: string, teacherId: string): Promise<string | null>;
   getSubmissionImageKey(id: string): Promise<string | null>;
   listPendingSubmissions(cursor: string): Promise<Array<Omit<Submission, "image_key" | "status" | "feedback"> & { image: boolean }>>;
+  listAdminSubmissions(status: Submission["status"] | "all"): Promise<Submission[]>;
+  listReviewedSubmissions(cursor: string): Promise<Submission[]>;
   applyDecision(id: string, status: "approved" | "rejected", feedback: string, decidedAt: string): Promise<"updated" | "already_synced" | "conflict">;
   findTeacherByUsername(username: string): Promise<{ id: string; active: boolean } | null>;
   setTeacherActive(teacherId: string, active: boolean): Promise<void>;
+  listTeacherAccounts(): Promise<TeacherAccount[]>;
+  upsertTeacherAccount(account: TeacherAccount): Promise<void>;
 }
 
 export interface ImageStore {

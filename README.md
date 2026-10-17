@@ -4,6 +4,23 @@ A professional Flask-based local-network CBT platform for schools.
 
 Version 3.0 focuses on exam reliability: students' answers are saved to their attempt, restored after refresh, and finalized against a server-enforced timer.
 
+## System and software requirements
+
+### School server
+
+- **Operating system:** Windows 10/11 64-bit or a supported 64-bit Linux distribution. Use a dedicated, reliably powered computer for a school deployment.
+- **Hardware baseline:** 4 CPU cores, 8 GB RAM, and at least 10 GB of free disk space. These are practical starting points, not a promise of capacity; database size, uploaded files, and simultaneous users affect the requirements.
+- **Network:** A private school LAN/Wi-Fi network with client isolation disabled, a reserved server IP address, and inbound TCP port 5000 allowed by the firewall. Internet is optional for LAN exams, but Gemini generation, package installation, hosted portals, and some formula rendering require internet access.
+- **Python:** Python 3.11 or newer, 64-bit, with `pip`. Install the project dependencies from `requirements.txt`.
+- **Database:** SQLite is suitable for evaluation or a small single-server installation. Use MySQL Server 8.0 or newer for a multi-user school deployment. Keep the database on a reliable drive and back it up separately.
+- **Client devices:** A current browser (Chrome, Edge, Firefox, or Safari) and access to the same LAN. Students need a supported screen/browser; the app does not require a native client installation.
+
+### Hosted AWS teacher portal (optional)
+
+Deploying or updating the portal additionally requires an AWS account with permissions to create and update the resources listed in `teacher_portal/template.yaml`, AWS CLI v2 configured for the correct account and region, AWS SAM CLI, and Node.js 22 with npm. The portal itself runs on managed AWS services; the school does not need Node.js running on its LAN server. Review AWS pricing before deploying because free-tier availability and prices vary.
+
+For a school with many simultaneous exam takers, use wired server networking, suitable Wi-Fi access points, and run a realistic load test before relying on the setup. The application has not been certified for a specific maximum number of simultaneous students.
+
 ## Features
 
 - Role-based sign-in for administrators, teachers, and students.
@@ -23,20 +40,76 @@ Version 3.0 focuses on exam reliability: students' answers are saved to their at
 - Subject, topic, and class metadata on every question.
 - MySQL storage for reliable multi-user school LAN deployment.
 - Optional daily Cloudflare R2 backups of the database and uploaded files, with 30-day retention.
-- A separate hosted teacher question portal with manually synced, administrator-reviewed submissions.
+- A hosted teacher question portal with online or locally reviewed submissions, multi-question upload, and manually synchronized teacher accounts.
 - Accessibility improvements including keyboard skip navigation, visible focus, screen-reader status announcements, semantic exam answer groups, accessible chart summaries, and reduced-motion support.
 
 ## Run locally
 
+### Windows first-time installation
+
+1. Install Python 3.11 or newer (64-bit) and select **Add Python to PATH** in the installer. Install Git if you will clone the repository.
+2. Open PowerShell and clone or enter the project folder:
+
+   ```powershell
+   git clone https://github.com/Firadwelt06/School-Assessment-Hub.git
+   cd School-Assessment-Hub
+   ```
+
+   If you already downloaded the project, `cd` to that folder instead.
+
+3. Create and activate a virtual environment, then install the required packages:
+
+   ```powershell
+   py -3 -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   python -m pip install --upgrade pip
+   python -m pip install -r requirements.txt
+   ```
+
+   If PowerShell blocks activation, use `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, then activate again. Alternatively, run `.venv\Scripts\python.exe -m pip install -r requirements.txt` and `.venv\Scripts\python.exe app.py` without activating.
+
+4. Copy the example environment file and edit it:
+
+   ```powershell
+   Copy-Item .env.example .env
+   notepad .env
+   ```
+
+   For a first evaluation, set `DB_ENGINE=sqlite`. Replace `FLASK_SECRET_KEY` and `DATA_CLEAR_PASSWORD` with private, strong values. Generate a key in PowerShell with:
+
+   ```powershell
+   python -c "import secrets; print(secrets.token_urlsafe(48))"
+   ```
+
+   `GEMINI_API_KEY` is optional; without it, the app uses its local question-generation fallback. Do not commit `.env` or share its values.
+
+5. Start the app:
+
+   ```powershell
+   python app.py
+   ```
+
+   Keep this terminal open while the app is in use. On the server, open `http://localhost:5000`. Stop the server with **Ctrl+C**. On a clean database, the initial demo sign-in is `admin` / `admin123`; immediately change the admin password and disable or replace all demo accounts before using real school data.
+
+For MySQL, install and start MySQL Server, create the database/application user as described in [First-time MySQL setup on Windows](#first-time-mysql-setup-on-windows), and set `DB_ENGINE=mysql` plus the connection values in `.env` before first startup.
+
+### Updating an existing installation
+
+1. Stop the Flask/Waitress process and make a verified database and `uploads` backup.
+2. Download or pull the new application version without overwriting `.env`, the database, or school uploads. If using Git, inspect `git status` before pulling so local edits are preserved.
+3. Activate the virtual environment and run `python -m pip install -r requirements.txt`.
+4. Review any new settings documented here against `.env.example`; retain existing secrets and database settings.
+5. Start the application and test login, question entry, exam delivery, and reports before resuming school use.
+
+### Quick start (already installed)
+
 ```powershell
-cd "E:\Projects (Working on)\Assessment"
+cd "path\to\School-Assessment-Hub"
 python -m pip install -r requirements.txt
-$env:FLASK_SECRET_KEY="replace-with-a-long-random-value"
-$env:GEMINI_API_KEY="your-gemini-key"  # required for Gemini generation
 python app.py
 ```
 
-You can alternatively create a `.env` file in the project folder:
+Use `.env` for settings that should persist across restarts:
 
 ```text
 FLASK_SECRET_KEY=replace-with-a-long-random-value
@@ -75,9 +148,15 @@ The application can upload a backup ZIP to a private Cloudflare R2 bucket. It co
 
 The scheduled job runs in the Flask/Waitress process, so backups run only while the application is running. A SQLite archive contains `database/assessment.sqlite3`; a MySQL archive contains `database/assessment.sql`. To restore, stop the app, restore the database snapshot using the matching database engine, restore the archive's `uploads` directory, and restart the app. Test restores periodically. The free R2 allowance is 10 GB-month; if the total size of the retained backups exceeds that amount, storage charges may apply.
 
-### Online teacher question portal (Stage 2)
+### Online teacher question portal
 
-The public teacher portal is separate from the school's local database. Teachers create individual portal accounts with a shared school signup code and submit questions (optionally with an image up to 5 MB). The local administrator uses **Administration → Online question submissions → Sync now** to download submissions, review them offline, and later sync decisions. Approval adds a question to the local bank only; the administrator must separately add it to an exam and publish that exam. Rejection feedback appears in the teacher's portal after decisions sync.
+The hosted portal is separate from the school's local database. Teachers create individual portal accounts with a shared school signup code. From the portal, they can submit one question (optionally with an image up to 5 MB), paste and preview a batch, download the JSON template, or import a question JSON file. Batches are limited to 50 questions and do not include images; enter image questions one at a time so the image stays attached to its question.
+
+The school administrator may review questions at the hosted portal's `/admin/login` page even when the school server is offline, or sync submissions to the local app and review them there. Decisions made online are copied into the local submission list and question bank on the next successful **Administration → Online question submissions → Sync now**. Decisions made locally are sent back to the portal on sync, so teachers can see the result and rejection feedback. Approval adds a question to the local bank only; the administrator must separately add it to an exam and publish that exam.
+
+Online teacher accounts are synchronized with local teacher accounts during manual sync. A teacher created on either side can use the same username and password on both after syncing. Password changes and disabled-account status are synchronized too. If both copies have changed since their last successful sync, the app flags a conflict; an administrator must select **Keep local** or **Keep online** in the local submission/sync page. Newly imported online teachers have no local subject or class assignments: an administrator must assign both locally before they can access student results. Class assignments remain on the school server.
+
+Exam results and student data are never uploaded to the hosted portal. Teachers can view results only on the school LAN and only for both their assigned subjects and explicitly assigned classes. The online portal stores teacher accounts and question submissions, not student results.
 
 #### Deploy a fresh AWS portal
 
@@ -224,7 +303,7 @@ Ready-to-upload examples are included in:
 - `sample_data/students_sample.csv`
 - `sample_data/teachers_sample.csv`
 
-Names entered during registration, manual account creation, and CSV imports have extra whitespace normalized and all-uppercase/all-lowercase words converted to standard capitalization (for example, `ada okafor` becomes `Ada Okafor`). Existing mixed-case name parts are preserved, and names containing digits are rejected. The sample accounts use intentionally simple test passwords and should only be used in a local test environment. Teacher imports require `full_name` and `password`; `username` and `subjects` are optional. Teacher accounts do not use a class/cohort assignment.
+Names entered during registration, manual account creation, and CSV imports have extra whitespace normalized and all-uppercase/all-lowercase words converted to standard capitalization (for example, `ada okafor` becomes `Ada Okafor`). Existing mixed-case name parts are preserved, and names containing digits are rejected. The sample accounts use intentionally simple test passwords and should only be used in a local test environment. Teacher imports require `full_name` and `password`; `username`, `subjects`, and `classes` are optional. The `subjects` and `classes` columns accept pipe-separated values, for example `Biology|Chemistry` and `SS1 A|SS2 B`. Teachers see student results only when both the subject and class are assigned. Imported online teacher accounts start with no local assignments; an administrator must assign them in **Administration**.
 
 ## Student rankings, exam timer, and answer recovery
 
@@ -323,3 +402,41 @@ If the application reports `local (GEMINI_API_KEY is not set)`, the running Flas
 ## AI acknowledgment and review
 
 The application uses AI-assisted generation to draft questions from teacher-provided lesson notes. AI-generated questions and answers may be inaccurate, incomplete, or unsuitable for a particular class. Teachers should verify the content, answer key, and curriculum alignment before using generated material in an exam; responsibility for the final assessment remains with the school and its educators.
+
+## Frequently asked questions
+
+### Portal sync reports HTTP 403
+
+Check that `CLOUD_PORTAL_URL` is the exact HTTPS `TeacherPortalUrl` from the AWS stack output, with no `/api/...` suffix, and that `CLOUD_PORTAL_SYNC_TOKEN` in the local app exactly matches the Lambda `SYNC_TOKEN`. Both values are private; do not paste them into a support message. Save Lambda environment changes, restart the local app after `.env` changes, and retry **Sync now**. If the URL uses an old Cloudflare deployment, use the matching portal and token or update to the AWS URL. A `401 Unauthorized` from an unauthenticated `curl.exe` test is expected and only checks that the endpoint responds.
+
+### Online teacher login works, but local sign-in or password does not
+
+Run **Administration → Online question submissions → Sync now** while the local server can reach the portal. This imports new online teacher accounts and copies a one-sided password change. A password change made locally is pushed on the next sync. If the local account and online account were both changed since their last successful sync, review the conflict on that page and choose which copy should be kept. A new online teacher also needs local subject and class assignments before seeing result reports.
+
+### Can teachers see results when the school server is offline?
+
+No. Student accounts, exam attempts, and results stay on the school server; they are not sent to AWS. A teacher needs to connect to the school LAN and sign into the local app. The local app restricts teacher rankings, analytics, and CSV reports to the intersection of their assigned subjects and classes. Admins assign those subjects and classes in **Administration**.
+
+### How should I upload many questions, or a question with a picture?
+
+Use **Submit a batch of questions** in the online portal for up to 50 text-only questions. Preview before submitting; a JSON template is downloadable there, and JSON imports use the same question fields as the offline question form. To include an image, use **Submit a question** for that one question. The offline batch form can also be used without internet and imported into the local Question Bank. Questions approved in the portal enter the local question bank on the next sync; they are not automatically added to an exam.
+
+### Why does the portal show “Something went wrong” after changing passwords?
+
+Deploy the current `teacher_portal` code and verify `npm run typecheck` and `npm run test:aws` before deployment. Current password hashes use the shared PBKDF2 format supported by both apps; do not edit stored hashes manually. If the issue continues, inspect the Lambda's CloudWatch log for the first error and share only the error text after removing usernames, request data, tokens, and other private information.
+
+### PowerShell says `sam` or `aws` is not recognized
+
+Install AWS CLI v2 and AWS SAM CLI, then open a new PowerShell window so the updated PATH is loaded. Check with `aws --version` and `sam --version`. Configure the CLI with credentials issued for your AWS account and verify the selected account with `aws sts get-caller-identity`. Never send access keys or secret keys to anyone assisting with troubleshooting.
+
+### What happens if the AWS portal stack is deleted?
+
+The CloudFormation template retains its DynamoDB tables and image bucket to reduce accidental data loss, so deleting the stack may leave billable resources behind. To stop all charges, identify and deliberately remove retained resources in the correct AWS account and region after exporting anything you need. Check AWS billing and current service pricing; costs depend on requests, stored images/data, logs, and region.
+
+### I cannot sign in with the initial admin account
+
+The `admin` / `admin123` account is created only when the application database has no users. If you used a populated or migrated database, use its existing administrator account. Do not reset or replace the database just to recreate the demo account; that risks deleting school records. Contact the school's system administrator for account recovery.
+
+### Where are local backups, and how do I restore them?
+
+The default SQLite database is `assessment.db` in the project folder; uploaded files are in `uploads`. Stop the app before copying a manual backup. For MySQL or R2 backup/restore steps, see [Cloud database backups](#cloud-database-backups-optional) and [First-time MySQL setup on Windows](#first-time-mysql-setup-on-windows). Keep at least one backup separate from the server and test restoration before relying on it.

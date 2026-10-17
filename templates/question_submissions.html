@@ -5,19 +5,41 @@
 {% if not portal_configured %}
 <section class="panel"><h2>Portal connection not configured</h2><p>Set <code>CLOUD_PORTAL_URL</code> and <code>CLOUD_PORTAL_SYNC_TOKEN</code> in the local <code>.env</code> file after deploying the portal.</p></section>
 {% else %}
-<section class="panel"><div class="section-title"><h2>Manual sync</h2><span class="muted">This is the only action that contacts the online portal</span></div><p>Sync downloads new pending questions and sends any review decisions that have not reached the portal yet. It never publishes an exam.</p><form method="post" action="{{ url_for('sync_admin_question_submissions') }}"><button class="button primary">Sync now</button></form></section>
+<section class="panel"><div class="section-title"><h2>Manual sync</h2><span class="muted">Connects teacher accounts and question reviews</span></div><p>Sync exchanges teacher accounts and password changes, downloads new submissions, and sends review decisions. If one teacher's account changed independently in both places, it is flagged below rather than silently overwriting a password. Sync never publishes an exam.</p><form method="post" action="{{ url_for('sync_admin_question_submissions') }}"><button class="button primary">Sync now</button></form></section>
+<section class="panel"><div class="section-title"><h2>Online portal administrator</h2><span class="muted">Set or reset the separate login for online review</span></div>
+  <p class="muted">This account lets you review submissions while the school server is offline. Use a unique password of at least 12 characters. The online admin password is stored as a password hash; the local app sends it securely to the portal and does not save the plain password.</p>
+  <form method="post" action="{{ url_for('configure_portal_admin') }}" class="form-grid">
+    <label>Admin username<input name="username" required minlength="3" maxlength="64" pattern="[A-Za-z0-9._-]+"></label>
+    <label>Admin full name<input name="full_name" required minlength="2" maxlength="100"></label>
+    <label class="full">New unique password<input name="password" type="password" required minlength="12" maxlength="128" autocomplete="new-password"></label>
+    <div class="full"><button class="button secondary">Save online admin login</button></div>
+  </form>
+</section>
 {% endif %}
 <section class="panel">
   <div class="section-title"><h2>Teacher accounts</h2><span class="muted">Reset a portal password when a teacher cannot sign in</span></div>
-  <details class="admin-details"><summary>Reset a teacher's portal password</summary><div class="admin-details-content">
-    <p class="muted">Set a temporary password and share it privately. The teacher can change it after signing in. This changes only the online portal password.</p>
+  <details class="admin-details"><summary>Reset a teacher's password</summary><div class="admin-details-content">
+    <p class="muted">For a teacher already synchronized to the local server, this changes the password locally and online. If the portal cannot be reached, the local password is saved and will sync on the next successful sync. Share the temporary password privately; the teacher should change it after signing in.</p>
     <form method="post" action="{{ url_for('reset_portal_teacher_password') }}" class="form-grid">
       <label>Portal username<input name="username" required minlength="3" maxlength="64" pattern="[A-Za-z0-9._-]+"></label>
       <label>Temporary password<input name="password" type="password" required minlength="8" maxlength="128" autocomplete="new-password"></label>
-      <div class="full"><button class="button secondary">Reset portal password</button></div>
+      <div class="full"><button class="button secondary">Reset teacher password</button></div>
     </form>
   </div></details>
 </section>
+{% if teacher_sync_conflicts %}
+<section class="panel"><div class="section-title"><h2>Teacher account conflicts</h2><span class="muted">Choose which account version to keep on both systems</span></div>
+  <p class="muted">If the local username belongs to a non-teacher account, rename that account before resolving to the portal version.</p>
+  {% for conflict in teacher_sync_conflicts %}
+  <div class="panel"><strong>{{ conflict.username }}</strong><span class="muted"> · Detected {{ conflict.detected_at }}</span>
+    <div class="actions">
+      <form method="post" action="{{ url_for('resolve_portal_teacher_conflict', username=conflict.username) }}" onsubmit="return confirm('Use the local password and account details for both systems?');"><input type="hidden" name="authority" value="local"><button class="button secondary">Keep local version</button></form>
+      <form method="post" action="{{ url_for('resolve_portal_teacher_conflict', username=conflict.username) }}" onsubmit="return confirm('Replace the local teacher password and name with the online account version?');"><input type="hidden" name="authority" value="portal"><button class="button secondary">Keep online version</button></form>
+    </div>
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
 <section class="panel">
   <div class="section-title"><h2>Manage teacher portal access</h2><span class="muted">Disable one teacher without changing the shared signup code</span></div>
   <details class="admin-details"><summary>Enable or disable a portal account</summary><div class="admin-details-content">

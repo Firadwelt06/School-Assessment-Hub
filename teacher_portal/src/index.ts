@@ -1,4 +1,4 @@
-import type { PortalEnv as Env, Submission, Teacher } from "./portal-store.js";
+import type { NewSubmission, PortalAdmin, PortalEnv as Env, Submission, Teacher, TeacherAccount } from "./portal-store.js";
 
 const SESSION_SECONDS = 7 * 24 * 60 * 60;
 const RATE_LIMIT_WINDOW_SECONDS = 15 * 60;
@@ -34,10 +34,13 @@ function page(
   notice = "",
   imageSource: string | null = null,
   script = "",
+  admin?: PortalAdmin,
 ) {
   const nonce = toBase64Url(crypto.getRandomValues(new Uint8Array(18)));
   const nav = teacher
     ? `<header><a href="/">School Assessment Hub</a><span>${escapeHtml(teacher.full_name)} · ${escapeHtml(teacher.username)}</span><form method="post" action="/logout"><button>Sign out</button></form></header>`
+    : admin
+      ? `<header><a href="/admin">School Assessment Hub</a><span>Administrator · ${escapeHtml(admin.full_name)}</span><form method="post" action="/admin/logout"><button>Sign out</button></form></header>`
     : `<header><a href="/">School Assessment Hub</a><span>Teacher question portal</span></header>`;
   return new Response(
     `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · School Assessment Hub</title><style>
@@ -66,6 +69,14 @@ function setCookie(token: string, maxAge = SESSION_SECONDS, secure = true) {
 
 function clearCookie(secure = true) {
   return `portal_session=; Path=/; HttpOnly;${secure ? " Secure;" : ""} SameSite=Lax; Max-Age=0`;
+}
+
+function setAdminCookie(token: string, secure = true) {
+  return `portal_admin_session=${token}; Path=/admin; HttpOnly;${secure ? " Secure;" : ""} SameSite=Lax; Max-Age=${SESSION_SECONDS}`;
+}
+
+function clearAdminCookie(secure = true) {
+  return `portal_admin_session=; Path=/admin; HttpOnly;${secure ? " Secure;" : ""} SameSite=Lax; Max-Age=0`;
 }
 
 function toHex(value: ArrayBuffer) {
@@ -108,6 +119,19 @@ async function hashPassword(
 }
 
 async function verifyPassword(password: string, stored: string) {
+  const localHash = stored.match(/^([a-f0-9]{32})\$([a-f0-9]{64})$/i);
+  if (localHash) {
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+    const bits = await crypto.subtle.deriveBits(
+      { name: "PBKDF2", salt: new TextEncoder().encode(localHash[1]), iterations: 120_000, hash: "SHA-256" },
+      key,
+      256,
+    );
+    const candidate = toHex(bits);
+    return candidate.length === localHash[2].length &&
+      [...candidate].reduce((difference, character, index) =>
+        difference | character.charCodeAt(0) ^ localHash[2].charCodeAt(index), 0) === 0;
+  }
   const [algorithm, iterationsValue, saltValue, digest] = stored.split("$");
   if (algorithm !== "pbkdf2" || !iterationsValue || !saltValue || !digest) return false;
   const iterations = Number(iterationsValue);
@@ -119,7 +143,14 @@ async function verifyPassword(password: string, stored: string) {
   for (let index = 0; index < digest.length; index++) {
     difference |= digest.charCodeAt(index) ^ candidateDigest.charCodeAt(index);
   }
+
   return difference === 0;
+}
+
+function isPortablePasswordHash(value: unknown): value is string {
+  return typeof value === "string" &&
+    (/^[a-f0-9]{32}\$[a-f0-9]{64}$/i.test(value) ||
+      /^pbkdf2\$100000\$[a-f0-9]{32}\$[a-f0-9]{64}$/i.test(value));
 }
 
 function formValue(form: FormData, key: string) {
@@ -173,6 +204,12 @@ async function getTeacher(request: Request, env: Env): Promise<Teacher | null> {
   const tokenHash = await sha256(token);
   const now = Math.floor(Date.now() / 1000);
   return env.store.findTeacherForSession(tokenHash, now);
+}
+
+async function getPortalAdmin(request: Request, env: Env): Promise<PortalAdmin | null> {
+  const token = request.headers.get("Cookie")?.match(/(?:^|;\s*)portal_admin_session=([A-Za-z0-9_-]+)/)?.[1];
+  if (!token) return null;
+  return env.store.findAdminForSession(await sha256(token), Math.floor(Date.now() / 1000));
 }
 
 function validOrigin(request: Request) {
@@ -234,6 +271,130 @@ function submissionCard(item: Submission) {
     ${item.standard ? `<p><strong>Standard:</strong> ${escapeHtml(item.standard)}</p>` : ""}
     ${item.feedback ? `<p class="notice ${status === "rejected" ? "error" : ""}"><strong>Administrator feedback:</strong> ${escapeHtml(item.feedback)}</p>` : ""}</article>`;
 }
+
+const batchSubmissionScript = String.raw`(() => {
+  const form = document.getElementById("batch-question-form");
+  if (!form) return;
+  const preview = document.getElementById("batch-preview");
+  const previewButton = document.getElementById("batch-preview-button");
+  const submitButton = document.getElementById("batch-submit-button");
+  const textInput = form.elements.namedItem("batch_text");
+  const fileInput = form.elements.namedItem("batch_file");
+  let prepared = null;
+
+  const metadata = () => ({
+    subject: form.elements.namedItem("subject").value.trim(),
+    topic: form.elements.namedItem("topic").value.trim(),
+    class_name: form.elements.namedItem("class_name").value.trim(),
+    difficulty: form.elements.namedItem("difficulty").value
+  });
+  const validate = (items, defaults) => items.map((item, index) => {
+    const question = { ...item };
+    question.subject = (typeof item.subject === "string" && item.subject.trim()) || defaults.subject;
+    question.topic = (typeof item.topic === "string" && item.topic.trim()) || defaults.topic;
+    question.class_name = (typeof item.class_name === "string" && item.class_name.trim()) || defaults.class_name;
+    question.difficulty = (typeof item.difficulty === "string" && item.difficulty.trim()) || defaults.difficulty || "medium";
+    ["stem", "option_a", "option_b", "option_c", "option_d", "explanation", "standard"].forEach((field) => {
+      question[field] = typeof item[field] === "string" ? item[field].trim() : "";
+    });
+    question.correct_option = typeof item.correct_option === "string" ? item.correct_option.trim().toUpperCase() : "";
+    question._errors = [];
+    const textFields = ["subject", "topic", "class_name", "difficulty", "stem", "option_a", "option_b", "option_c", "option_d", "correct_option", "explanation", "standard"];
+    if (textFields.some((field) => item[field] !== undefined && typeof item[field] !== "string")) {
+      question._errors.push("Question fields must be text.");
+    }
+    ["subject", "topic", "stem", "option_a", "option_b", "option_c", "option_d"].forEach((field) => {
+      if (!question[field]) question._errors.push("Missing " + field.replace("_", " ") + ".");
+    });
+    if (!["A", "B", "C", "D"].includes(question.correct_option)) question._errors.push("Answer must be A, B, C, or D.");
+    if (!["easy", "medium", "hard"].includes(question.difficulty)) question._errors.push("Difficulty must be easy, medium, or hard.");
+    if (question._errors.length) question._label = "Question " + (index + 1) + ": " + question._errors.join(" ");
+    return question;
+  });
+  const parseText = (value) => {
+    const starts = [...value.matchAll(/^\s*\d+[.)]\s+/gm)];
+    return starts.map((match, index) => {
+      const start = match.index;
+      const end = index + 1 < starts.length ? starts[index + 1].index : value.length;
+      const block = value.slice(start, end).split(/\r?\n/);
+      block[0] = block[0].replace(/^\s*\d+[.)]\s+/, "");
+      const result = { stem: "", option_a: "", option_b: "", option_c: "", option_d: "", correct_option: "" };
+      let current = "";
+      for (const line of block) {
+        const answer = line.match(/^\s*(?:answer|correct answer)\s*:\s*([A-D])\b/i);
+        if (answer) { result.correct_option = answer[1].toUpperCase(); current = ""; continue; }
+        const option = line.match(/^\s*([A-D])[.)]\s*(.*)$/i);
+        if (option) { current = "option_" + option[1].toLowerCase(); result[current] = option[2].trim(); continue; }
+        if (current) result[current] += (result[current] ? "\n" : "") + line.trim();
+        else result.stem += (result.stem ? "\n" : "") + line.trim();
+      }
+      return result;
+    });
+  };
+  const readItems = async () => {
+    const file = fileInput.files && fileInput.files[0];
+    if (file) {
+      const payload = JSON.parse(await file.text());
+      const items = Array.isArray(payload) ? payload : payload.questions;
+      if (!Array.isArray(items)) throw new Error("JSON must contain a questions array.");
+      const defaults = metadata();
+      if (!Array.isArray(payload) && payload && typeof payload === "object") {
+        ["subject", "topic", "class_name", "difficulty"].forEach((field) => {
+          if (!defaults[field] && typeof payload[field] === "string") defaults[field] = payload[field].trim();
+        });
+      }
+      return validate(items, defaults);
+    }
+    return validate(parseText(textInput.value), metadata());
+  };
+  const renderPreview = (items) => {
+    preview.replaceChildren();
+    if (!items.length) {
+      preview.textContent = "No numbered questions found. Start each question with 1. and include A-D options plus Answer: B.";
+      return false;
+    }
+    const valid = items.length <= 50 && items.every((item) => !item._errors.length);
+    if (items.length > 50) preview.textContent = "A batch can contain no more than 50 questions.";
+    items.forEach((item, index) => {
+      const card = document.createElement("p");
+      card.textContent = (index + 1) + ". " + item.stem + (item._errors.length ? " — " + item._errors.join(" ") : "");
+      preview.append(card);
+    });
+    return valid;
+  };
+  form.addEventListener("input", () => { prepared = null; submitButton.disabled = true; });
+  form.addEventListener("change", () => { prepared = null; submitButton.disabled = true; });
+  previewButton.addEventListener("click", async () => {
+    try {
+      const items = await readItems();
+      const valid = renderPreview(items);
+      prepared = valid ? { ...metadata(), questions: items.map(({ _errors, _label, ...item }) => item) } : null;
+      submitButton.disabled = !prepared;
+    } catch (error) {
+      preview.textContent = error instanceof Error ? error.message : "Could not read the selected question file.";
+      prepared = null;
+      submitButton.disabled = true;
+    }
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!prepared) return;
+    submitButton.disabled = true;
+    try {
+      const response = await fetch("/api/batch-submissions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(prepared)
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Batch submission failed.");
+      window.location.href = "/?notice=" + encodeURIComponent("Submitted " + result.submitted + " questions for review.");
+    } catch (error) {
+      preview.textContent = error instanceof Error ? error.message : "Batch submission failed.";
+      submitButton.disabled = false;
+    }
+  });
+})();`;
 
 function dashboardPage(
   teacher: Teacher,
@@ -307,12 +468,78 @@ function dashboardPage(
     <label class="full">Explanation <small>Optional</small><textarea name="explanation" maxlength="5000"></textarea></label>
     <label class="full">Curriculum standard <small>Optional</small><input name="standard" maxlength="500"></label>
     <div class="full"><button>Submit question for review</button></div></form></section>
+    <section class="panel"><h2>Submit a batch of questions</h2>
+      <p class="muted">Paste plain-text multiple-choice questions, preview them, then submit up to 50 without images. For questions with pictures, use the single-question form above so each image is attached correctly.</p>
+      <p><a href="/batch-template.json">Download the JSON batch template</a>. You can also import a JSON file exported by the offline question form.</p>
+      <form id="batch-question-form" class="grid">
+        <label>Subject<input name="subject" required maxlength="120"></label>
+        <label>Topic<input name="topic" required maxlength="200"></label>
+        <label>Class or level<input name="class_name" maxlength="120"></label>
+        <label>Difficulty<select name="difficulty"><option value="easy">Easy</option><option value="medium" selected>Medium</option><option value="hard">Hard</option></select></label>
+        <label class="full">Paste questions<textarea name="batch_text" rows="10" placeholder="1. Question text\\nA. Option one\\nB. Option two\\nC. Option three\\nD. Option four\\nAnswer: B"></textarea></label>
+        <label class="full">Or choose an exported JSON question file<input name="batch_file" type="file" accept=".json,application/json"></label>
+        <div class="full actions"><button type="button" class="secondary" id="batch-preview-button">Preview batch</button><button id="batch-submit-button" disabled>Submit batch</button></div>
+        <div class="full" id="batch-preview" aria-live="polite"></div>
+      </form>
+    </section>
     <h2>Your submissions</h2>${records}`,
     teacher,
     notice,
     imageSource,
-    directImageUpload,
+    `${directImageUpload}${batchSubmissionScript}`,
   );
+}
+
+function adminLoginPage(notice = "") {
+  return page(
+    "Portal administrator sign in",
+    `<h1>Administrator sign in</h1><section class="panel">
+      <form method="post" action="/admin/login" class="grid">
+        <label>Username<input name="username" required autocomplete="username" maxlength="64"></label>
+        <label>Password<input name="password" type="password" required autocomplete="current-password" maxlength="128"></label>
+        <div class="full"><button>Sign in</button></div>
+      </form>
+    </section>`,
+    undefined,
+    notice,
+  );
+}
+
+function portalAdminPage(
+  admin: PortalAdmin,
+  submissions: Submission[],
+  status: Submission["status"] | "all",
+  notice = "",
+  imageSource: string | null = null,
+) {
+  const filters = [
+    ["pending", "Pending"],
+    ["approved", "Approved"],
+    ["rejected", "Rejected"],
+    ["all", "All"],
+  ] as const;
+  const content = `<h1>Online submission review</h1>
+    <p class="muted">Reviewing here works without the school server. Decisions are copied into the local question bank on its next successful sync; approval does not publish an exam.</p>
+    <nav class="actions" aria-label="Submission filters">${filters.map(([value, label]) =>
+      `<a class="button secondary" href="/admin?status=${value}"${status === value ? ' aria-current="page"' : ""}>${label}</a>`,
+    ).join("")}</nav>
+    ${submissions.length ? submissions.map((item) => `<section class="panel">
+      <h2>${escapeHtml(item.subject)} · ${escapeHtml(item.topic)}</h2>
+      <p class="muted">${escapeHtml(item.teacher_name)} (${escapeHtml(item.teacher_username)}) · ${escapeHtml(item.class_name || "All classes")} · ${escapeHtml(item.submitted_at)}</p>
+      <p><strong>Status:</strong> ${escapeHtml(item.status)}</p>
+      ${item.image_key ? `<img class="submission-image" src="/admin/submissions/${encodeURIComponent(item.id)}/image" alt="Question image">` : ""}
+      <p><strong>${escapeHtml(item.stem)}</strong></p>
+      <ol type="A"><li>${escapeHtml(item.option_a)}</li><li>${escapeHtml(item.option_b)}</li><li>${escapeHtml(item.option_c)}</li><li>${escapeHtml(item.option_d)}</li></ol>
+      <p>Correct option: <strong>${escapeHtml(item.correct_option)}</strong> · Difficulty: ${escapeHtml(item.difficulty)}</p>
+      ${item.explanation ? `<p><strong>Explanation:</strong> ${escapeHtml(item.explanation)}</p>` : ""}
+      ${item.standard ? `<p><strong>Standard:</strong> ${escapeHtml(item.standard)}</p>` : ""}
+      ${item.feedback ? `<p class="notice"><strong>Feedback:</strong> ${escapeHtml(item.feedback)}</p>` : ""}
+      ${item.status === "pending" ? `<form method="post" action="/admin/submissions/${encodeURIComponent(item.id)}/review" class="grid">
+        <label class="full">Optional note<textarea name="feedback" maxlength="1000"></textarea></label>
+        <div class="full actions"><button name="status" value="approved">Approve</button><button class="secondary" name="status" value="rejected">Reject</button></div>
+      </form>` : ""}
+    </section>`).join("") : `<section class="panel"><p>No submissions in this view.</p></section>`}`;
+  return page("Online submission review", content, undefined, notice, imageSource, "", admin);
 }
 
 async function login(request: Request, env: Env) {
@@ -339,6 +566,29 @@ async function login(request: Request, env: Env) {
   });
   return redirect("/", {
     "Set-Cookie": setCookie(sessionToken, SESSION_SECONDS, new URL(request.url).protocol === "https:"),
+  });
+}
+
+async function loginAdmin(request: Request, env: Env) {
+  if (!validOrigin(request)) return adminLoginPage("The sign-in request could not be verified.");
+  const rateState = await rateLimitState(env, request, "admin-login");
+  if (rateState.limited) return adminLoginPage("Too many sign-in attempts. Wait 15 minutes and try again.");
+  const form = await request.formData();
+  const username = normalizeUsername(text(form, "username"));
+  const password = formValue(form, "password");
+  const admin = await env.store.findAdminForLogin(username);
+  if (!admin || password.length > 128 || !await verifyPassword(password, admin.password_hash)) {
+    await recordRateLimitedAttempt(env, rateState);
+    return adminLoginPage("Username or password is incorrect.");
+  }
+  const token = toBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+  await env.store.createAdminSession({
+    token_hash: await sha256(token),
+    username: admin.username,
+    expires_at: Math.floor(Date.now() / 1000) + SESSION_SECONDS,
+  });
+  return redirect("/admin", {
+    "Set-Cookie": setAdminCookie(token, new URL(request.url).protocol === "https:"),
   });
 }
 
@@ -581,12 +831,100 @@ async function syncPending(request: Request, env: Env) {
   });
 }
 
+async function syncReviewed(request: Request, env: Env) {
+  if (!await requireSyncToken(request, env)) return json({ error: "Unauthorized." }, 401);
+  const cursor = new URL(request.url).searchParams.get("cursor") ?? "";
+  if (cursor && !UUID_PATTERN.test(cursor)) return json({ error: "Invalid cursor." }, 400);
+  const submissions = await env.store.listReviewedSubmissions(cursor);
+  const hasMore = submissions.length > 100;
+  const pageItems = submissions.slice(0, 100).map(({ image_key, ...item }) => ({
+    ...item,
+    image: Boolean(image_key),
+  }));
+  return json({
+    submissions: pageItems,
+    next_cursor: hasMore ? pageItems[pageItems.length - 1].id : "",
+  });
+}
+
 async function syncSubmissionImage(request: Request, env: Env, id: string) {
   if (!await requireSyncToken(request, env)) return json({ error: "Unauthorized." }, 401);
   if (!/^[0-9a-fA-F-]{36}$/.test(id)) return json({ error: "Not found." }, 404);
   const imageKey = await env.store.getSubmissionImageKey(id);
   if (!imageKey) return json({ error: "Image not found." }, 404);
   return serveImage(env, imageKey);
+}
+
+async function syncTeacherAccounts(request: Request, env: Env) {
+  if (!await requireSyncToken(request, env)) return json({ error: "Unauthorized." }, 401);
+  return json({ teachers: await env.store.listTeacherAccounts() });
+}
+
+async function syncTeacherAccount(request: Request, env: Env) {
+  if (!await requireSyncToken(request, env)) return json({ error: "Unauthorized." }, 401);
+  let body: Record<string, unknown>;
+  try {
+    body = await readJson(request);
+  } catch {
+    return json({ error: "Invalid or oversized teacher account." }, 400);
+  }
+  const username = typeof body.username === "string" ? normalizeUsername(body.username) : "";
+  const fullName = typeof body.full_name === "string" ? body.full_name.trim() : "";
+  if (
+    !/^[a-z0-9._-]{3,64}$/.test(username) ||
+    fullName.length < 2 ||
+    fullName.length > 100 ||
+    !isPortablePasswordHash(body.password_hash) ||
+    typeof body.active !== "boolean"
+  ) {
+    return json({ error: "Teacher account fields are invalid." }, 400);
+  }
+  await env.store.upsertTeacherAccount({
+    username,
+    full_name: fullName,
+    password_hash: body.password_hash,
+    active: body.active,
+  });
+  return json({ ok: true });
+}
+
+async function setPortalAdmin(request: Request, env: Env) {
+  if (!await requireSyncToken(request, env)) return json({ error: "Unauthorized." }, 401);
+  let body: Record<string, unknown>;
+  try {
+    body = await readJson(request);
+  } catch {
+    return json({ error: "Invalid administrator setup request." }, 400);
+  }
+  const username = typeof body.username === "string" ? normalizeUsername(body.username) : "";
+  const fullName = typeof body.full_name === "string" ? body.full_name.trim() : "";
+  const password = typeof body.password === "string" ? body.password : "";
+  if (!/^[a-z0-9._-]{3,64}$/.test(username) || fullName.length < 2 || fullName.length > 100 ||
+      password.length < 12 || password.length > 128) {
+    return json({ error: "Use a valid username, name, and password of at least 12 characters." }, 400);
+  }
+  await env.store.saveAdmin({ username, full_name: fullName, password_hash: await hashPassword(password) });
+  return json({ ok: true });
+}
+
+async function reviewPortalSubmission(request: Request, env: Env, admin: PortalAdmin, id: string) {
+  if (!validOrigin(request)) return portalAdminPage(admin, [], "pending", "The review request could not be verified.");
+  const form = await request.formData();
+  const status = text(form, "status");
+  const feedback = text(form, "feedback").trim();
+  if (!UUID_PATTERN.test(id) || !["approved", "rejected"].includes(status) || feedback.length > 1000) {
+    return portalAdminPage(admin, [], "pending", "The review choice or feedback is invalid.");
+  }
+  const outcome = await env.store.applyDecision(
+    id,
+    status as "approved" | "rejected",
+    feedback,
+    new Date().toISOString(),
+  );
+  if (outcome === "conflict") {
+    return redirect("/admin?notice=This%20submission%20was%20already%20reviewed.");
+  }
+  return redirect("/admin?notice=Review%20decision%20saved.%20It%20will%20sync%20to%20the%20school%20server.");
 }
 
 async function prepareImageUpload(request: Request, env: Env) {
@@ -618,6 +956,85 @@ async function prepareImageUpload(request: Request, env: Env) {
     upload_url: upload.url,
     upload_headers: upload.headers,
   });
+}
+
+async function submitBatch(request: Request, env: Env) {
+  if (!validOrigin(request)) return json({ error: "The batch request could not be verified." }, 403);
+  const teacher = await getTeacher(request, env);
+  if (!teacher) return json({ error: "Sign in again before submitting questions." }, 401);
+  let body: Record<string, unknown>;
+  try {
+    body = await readJson(request);
+  } catch {
+    return json({ error: "Invalid or oversized batch request." }, 400);
+  }
+  if (!Array.isArray(body.questions) || body.questions.length < 1 || body.questions.length > 50) {
+    return json({ error: "Submit between 1 and 50 questions in a batch." }, 400);
+  }
+  const textFields = [
+    "subject", "topic", "class_name", "difficulty", "stem",
+    "option_a", "option_b", "option_c", "option_d", "correct_option",
+    "explanation", "standard",
+  ];
+  if (textFields.some((field) => body[field] !== undefined && typeof body[field] !== "string")) {
+    return json({ error: "Batch metadata fields must be text." }, 400);
+  }
+  const limits: Record<string, number> = {
+    subject: 120, topic: 200, class_name: 120, stem: 5000,
+    option_a: 2000, option_b: 2000, option_c: 2000, option_d: 2000,
+    explanation: 5000, standard: 500,
+  };
+  const submissions: NewSubmission[] = [];
+  for (const [index, entry] of body.questions.entries()) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return json({ error: `Question ${index + 1} is invalid.` }, 400);
+    }
+    const item = entry as Record<string, unknown>;
+    if (textFields.some((field) => item[field] !== undefined && typeof item[field] !== "string")) {
+      return json({ error: `Question ${index + 1} fields must be text.` }, 400);
+    }
+    const submission = {
+      subject: String(item.subject ?? body.subject ?? "").trim(),
+      topic: String(item.topic ?? body.topic ?? "").trim(),
+      class_name: String(item.class_name ?? body.class_name ?? "").trim(),
+      stem: String(item.stem ?? "").trim(),
+      option_a: String(item.option_a ?? "").trim(),
+      option_b: String(item.option_b ?? "").trim(),
+      option_c: String(item.option_c ?? "").trim(),
+      option_d: String(item.option_d ?? "").trim(),
+      correct_option: String(item.correct_option ?? "").trim().toUpperCase(),
+      difficulty: String(item.difficulty ?? body.difficulty ?? "medium").trim().toLowerCase(),
+      explanation: String(item.explanation ?? "").trim(),
+      standard: String(item.standard ?? "").trim(),
+    };
+    for (const [field, maxLength] of Object.entries(limits)) {
+      if (submission[field as keyof typeof submission].length > maxLength) {
+        return json({ error: `Question ${index + 1}: ${field.replace("_", " ")} is too long.` }, 400);
+      }
+    }
+    const missing = ["subject", "topic", "stem", "option_a", "option_b", "option_c", "option_d"]
+      .filter((field) => !submission[field as keyof typeof submission]);
+    if (missing.length) return json({ error: `Question ${index + 1} is missing ${missing.join(", ")}.` }, 400);
+    if (!["A", "B", "C", "D"].includes(submission.correct_option)) {
+      return json({ error: `Question ${index + 1} needs a correct answer of A, B, C, or D.` }, 400);
+    }
+    if (!["easy", "medium", "hard"].includes(submission.difficulty)) {
+      return json({ error: `Question ${index + 1} has an invalid difficulty.` }, 400);
+    }
+    submissions.push({
+      id: crypto.randomUUID(),
+      teacher_id: teacher.id,
+      teacher_name: teacher.full_name,
+      teacher_username: teacher.username,
+      ...submission,
+      image_key: null,
+      status: "pending",
+      feedback: "",
+      submitted_at: new Date().toISOString(),
+    });
+  }
+  for (const submission of submissions) await env.store.createSubmission(submission);
+  return json({ submitted: submissions.length }, 201);
 }
 
 async function syncDecisions(request: Request, env: Env) {
@@ -703,9 +1120,36 @@ async function router(request: Request, env: Env): Promise<Response> {
 
   if (method === "GET" && path === "/login") return loginPage(url.searchParams.get("notice") ?? "");
   if (method === "GET" && path === "/register") return registerPage();
+  if (method === "GET" && path === "/batch-template.json") {
+    return new Response(JSON.stringify({
+      subject: "Mathematics",
+      topic: "Fractions",
+      class_name: "",
+      difficulty: "medium",
+      questions: [{
+        stem: "What is 1/2 + 1/4?",
+        option_a: "1/4",
+        option_b: "2/4",
+        option_c: "3/4",
+        option_d: "1",
+        correct_option: "C",
+        explanation: "Convert to quarters and add.",
+        standard: "",
+      }],
+    }, null, 2), {
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Content-Disposition": 'attachment; filename="teacher-question-batch-template.json"',
+        "Cache-Control": "no-store",
+      },
+    });
+  }
   if (method === "POST" && path === "/login") return login(request, env);
   if (method === "POST" && path === "/register") return register(request, env);
+  if (method === "GET" && path === "/admin/login") return adminLoginPage(url.searchParams.get("notice") ?? "");
+  if (method === "POST" && path === "/admin/login") return loginAdmin(request, env);
   if (method === "POST" && path === "/api/image-upload") return prepareImageUpload(request, env);
+  if (method === "POST" && path === "/api/batch-submissions") return submitBatch(request, env);
   if (method === "POST" && path === "/logout") {
     if (!validOrigin(request)) return new Response("Forbidden", { status: 403 });
     const token = request.headers.get("Cookie")?.match(/(?:^|;\s*)portal_session=([A-Za-z0-9_-]+)/)?.[1];
@@ -717,6 +1161,10 @@ async function router(request: Request, env: Env): Promise<Response> {
 
   if (path.startsWith("/api/sync/")) {
     if (method === "GET" && path === "/api/sync/pending") return syncPending(request, env);
+    if (method === "GET" && path === "/api/sync/reviewed") return syncReviewed(request, env);
+    if (method === "GET" && path === "/api/sync/teachers") return syncTeacherAccounts(request, env);
+    if (method === "POST" && path === "/api/sync/teachers/upsert") return syncTeacherAccount(request, env);
+    if (method === "POST" && path === "/api/sync/admin/set-password") return setPortalAdmin(request, env);
     if (method === "POST" && path === "/api/sync/decisions") return syncDecisions(request, env);
     if (method === "POST" && path === "/api/sync/teachers/reset-password") {
       return resetTeacherPassword(request, env);
@@ -727,6 +1175,38 @@ async function router(request: Request, env: Env): Promise<Response> {
     const imageMatch = path.match(/^\/api\/sync\/submissions\/([0-9a-fA-F-]{36})\/image$/);
     if (method === "GET" && imageMatch) return syncSubmissionImage(request, env, imageMatch[1]);
     return json({ error: "Not found." }, 404);
+  }
+
+  if (path === "/admin" || path.startsWith("/admin/")) {
+    if (method === "POST" && path === "/admin/logout") {
+      if (!validOrigin(request)) return new Response("Forbidden", { status: 403 });
+      const token = request.headers.get("Cookie")?.match(/(?:^|;\s*)portal_admin_session=([A-Za-z0-9_-]+)/)?.[1];
+      if (token) await env.store.deleteAdminSession(await sha256(token));
+      return redirect("/admin/login", { "Set-Cookie": clearAdminCookie(new URL(request.url).protocol === "https:") });
+    }
+    const admin = await getPortalAdmin(request, env);
+    if (!admin) return redirect("/admin/login");
+    if (method === "GET" && path === "/admin") {
+      const requestedStatus = url.searchParams.get("status") ?? "pending";
+      const status = ["pending", "approved", "rejected", "all"].includes(requestedStatus)
+        ? requestedStatus as Submission["status"] | "all"
+        : "pending";
+      return portalAdminPage(
+        admin,
+        await env.store.listAdminSubmissions(status),
+        status,
+        url.searchParams.get("notice") ?? "",
+        env.images.getAllowedImageSource(),
+      );
+    }
+    const imageMatch = path.match(/^\/admin\/submissions\/([0-9a-fA-F-]{36})\/image$/);
+    if (method === "GET" && imageMatch) {
+      const imageKey = await env.store.getSubmissionImageKey(imageMatch[1]);
+      return imageKey ? serveImage(env, imageKey) : new Response("Not found", { status: 404 });
+    }
+    const reviewMatch = path.match(/^\/admin\/submissions\/([0-9a-fA-F-]{36})\/review$/);
+    if (method === "POST" && reviewMatch) return reviewPortalSubmission(request, env, admin, reviewMatch[1]);
+    return new Response("Not found", { status: 404 });
   }
 
   const teacher = await getTeacher(request, env);
