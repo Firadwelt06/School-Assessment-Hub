@@ -204,7 +204,7 @@ Resources:
       CorsConfiguration:
         CorsRules:
           - AllowedOrigins:
-              - !Sub "https://${TeacherPortalApi}.execute-api.${AWS::Region}.amazonaws.com"
+              - "*"
             AllowedMethods:
               - PUT
             AllowedHeaders:
@@ -217,12 +217,10 @@ Resources:
         Rules:
           - Id: expire-abandoned-portal-image-uploads
             Status: Enabled
-            Filter:
-              Tag:
-                Key: portal-image-state
+            TagFilters:
+              - Key: portal-image-state
                 Value: staged
-            Expiration:
-              Days: 1
+            ExpirationInDays: 1
 
 Outputs:
   TeacherPortalUrl:
