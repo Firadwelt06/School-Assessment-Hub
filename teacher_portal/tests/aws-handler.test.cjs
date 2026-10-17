@@ -1,5 +1,7 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const test = require("node:test");
+const path = require("node:path");
 
 process.env.TEACHERS_TABLE = "teachers";
 process.env.SESSIONS_TABLE = "sessions";
@@ -68,4 +70,9 @@ test("teacher account sync APIs reject requests without the sync token", async (
   const response = await handler(event("/api/sync/teachers"));
   assert.equal(response.statusCode, 401);
   assert.deepEqual(JSON.parse(response.body), { error: "Unauthorized." });
+});
+
+test("AWS function role can scan the teacher directory for account sync", () => {
+  const template = fs.readFileSync(path.join(__dirname, "..", "template.yaml"), "utf8");
+  assert.match(template, /- dynamodb:Scan/);
 });

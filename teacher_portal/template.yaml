@@ -57,6 +57,7 @@ Resources:
                 - dynamodb:UpdateItem
                 - dynamodb:DeleteItem
                 - dynamodb:Query
+                - dynamodb:Scan
                 - dynamodb:TransactWriteItems
               Resource:
                 - !GetAtt TeachersTable.Arn
