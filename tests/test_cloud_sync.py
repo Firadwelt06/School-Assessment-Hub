@@ -1,11 +1,13 @@
+import io
 import sqlite3
 import tempfile
 import unittest
+import urllib.error
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from cloud_sync import portal_request, sync_question_submissions
+from cloud_sync import PortalSyncError, portal_request, sync_question_submissions
 
 
 REMOTE_ID = "123e4567-e89b-12d3-a456-426614174000"
@@ -81,6 +83,31 @@ class CloudSyncTests(unittest.TestCase):
             "image": True,
             "submitted_at": "2026-10-15T12:00:00.000Z",
         }
+
+    def test_http_errors_identify_endpoint_and_cloudflare_ray_without_token(self):
+        token = "private-test-token-value-with-at-least-32-characters"
+        error = urllib.error.HTTPError(
+            "https://portal.example.workers.dev/api/sync/pending",
+            403,
+            "Forbidden",
+            {"CF-Ray": "ray-test-123"},
+            io.BytesIO(b"Forbidden"),
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "CLOUD_PORTAL_URL": "https://portal.example.workers.dev",
+                "CLOUD_PORTAL_SYNC_TOKEN": token,
+            },
+        ), patch("cloud_sync.urllib.request.urlopen", side_effect=error):
+            with self.assertRaises(PortalSyncError) as raised:
+                portal_request("/api/sync/pending")
+
+        self.assertIn("GET /api/sync/pending", str(raised.exception))
+        self.assertIn("HTTP 403", str(raised.exception))
+        self.assertIn("ray-test-123", str(raised.exception))
+        self.assertNotIn(token, str(raised.exception))
 
     def test_sync_downloads_question_and_optional_image_once(self):
         def portal_request(path, **kwargs):

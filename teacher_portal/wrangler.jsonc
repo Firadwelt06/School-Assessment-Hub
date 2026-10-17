@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "school-assessment-teacher-portal",
+  "name": "exam-arena-teacher-portal",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-15",
   "workers_dev": true,
@@ -12,6 +12,19 @@
       "migrations_dir": "migrations"
     }
   ],
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": true,
+      "persist": true
+    },
+    "traces": {
+      "enabled": false,
+      "head_sampling_rate": 1,
+      "persist": true
+    }
+  },
   "r2_buckets": [
     {
       "binding": "SUBMISSION_IMAGES",

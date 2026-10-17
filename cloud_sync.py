@@ -64,9 +64,13 @@ def portal_request(path, method="GET", payload=None, binary=False):
             message = json.loads(response_text).get("error", "")
         except (ValueError, AttributeError):
             message = ""
-        raise PortalSyncError(
-            message or f"Portal returned HTTP {error.code}."
-        ) from error
+        cloudflare_ray = error.headers.get("CF-Ray", "") if error.headers else ""
+        context = f"Portal {method.upper()} {path} returned HTTP {error.code}"
+        if cloudflare_ray:
+            context += f" (Cloudflare Ray ID {cloudflare_ray})"
+        if message:
+            context += f": {message}"
+        raise PortalSyncError(f"{context}.") from error
     except urllib.error.URLError as error:
         raise PortalSyncError(f"Could not reach the teacher portal: {error.reason}") from error
     except TimeoutError as error:

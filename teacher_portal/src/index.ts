@@ -38,7 +38,7 @@ const SESSION_SECONDS = 7 * 24 * 60 * 60;
 const RATE_LIMIT_WINDOW_SECONDS = 15 * 60;
 const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
-const PASSWORD_ITERATIONS = 310_000;
+const PASSWORD_ITERATIONS = 100_000;
 
 const escapeHtml = (value: unknown) =>
   String(value ?? "").replace(/[&<>"']/g, (character) => ({
@@ -136,7 +136,7 @@ async function verifyPassword(password: string, stored: string) {
   const [algorithm, iterationsValue, saltValue, digest] = stored.split("$");
   if (algorithm !== "pbkdf2" || !iterationsValue || !saltValue || !digest) return false;
   const iterations = Number(iterationsValue);
-  if (!Number.isInteger(iterations) || iterations < 100_000 || iterations > 1_000_000) return false;
+  if (!Number.isInteger(iterations) || iterations < 100_000 || iterations > PASSWORD_ITERATIONS) return false;
   const candidate = await hashPassword(password, fromHex(saltValue), iterations);
   const candidateDigest = candidate.split("$")[3];
   if (candidateDigest.length !== digest.length) return false;
