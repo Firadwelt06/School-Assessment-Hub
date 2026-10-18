@@ -28,6 +28,7 @@
     <a href="{{ url_for('questions') }}" {% if request.endpoint in ['questions', 'manual_question', 'edit_question'] %}aria-current="page"{% endif %}>Question Bank</a>
     <a href="{{ url_for('new_exam') }}" {% if request.endpoint == 'new_exam' %}aria-current="page"{% endif %}>Create Exam</a>
     <a href="{{ url_for('rankings') }}" {% if request.endpoint == 'rankings' %}aria-current="page"{% endif %}>Student Rankings</a>
+    <a href="{{ url_for('staff_results') }}" {% if request.endpoint in ['staff_results', 'results_detail_csv'] %}aria-current="page"{% endif %}>Student Results</a>
     <a href="{{ url_for('analytics') }}" {% if request.endpoint == 'analytics' %}aria-current="page"{% endif %}>Performance Analytics</a>
     {% endif %}
     {% if user.role == 'admin' %}<a href="{{ url_for('admin') }}" {% if request.endpoint == 'admin' %}aria-current="page"{% endif %}>Administration</a>{% endif %}

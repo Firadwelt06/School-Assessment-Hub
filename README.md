@@ -33,6 +33,8 @@ For a school with many simultaneous exam takers, use wired server networking, su
 - Attempt-scoped answer autosaving, refresh recovery, offline browser drafts, and clear connection/save status.
 - Question navigator with answered/unanswered progress and staff visibility into in-progress and elapsed attempts.
 - Automatic marking with subject and overall student rankings by class.
+- Staff-only local results review with class, subject, and exam-type filters plus detailed CSV export; teacher access remains limited to assigned classes and subjects.
+- Administrator-created local SQLite backups and validated restore with an automatic pre-restore safety copy.
 - Five administrator-selectable themes or an uploaded image theme.
 - Manual question entry with LaTeX formula support.
 - Administrator-controlled exam rewrite permissions.
@@ -137,6 +139,14 @@ CLOUD_PORTAL_SYNC_TOKEN=
 
 Restart `python app.py` after changing `.env`; environment variables are read when the process starts. In normal mode, `python app.py` now starts the Waitress production WSGI server. Set `FLASK_DEBUG=1` only for development.
 
+### Local database backups and restore
+
+SQLite and MySQL installations can create backups from **Administration → Local backups**. The archive contains a consistent database snapshot and the `uploads` files, and is kept in the private `local_backups` folder on the school server. Administrators can download a copy to removable storage or another offline location.
+
+To restore, first ensure no exams are running, then choose a server-stored backup in **Administration → Local backups**, type `RESTORE`, and confirm. The app validates the archive and database before replacing school data, creates a pre-restore safety backup automatically, and signs out the administrator after success. Restoring replaces current database records and uploaded files. Keep a separate copy of backups; local backups on the server do not protect against server or drive failure.
+
+The in-app restore accepts complete SQLite or MySQL backups created by this application. MySQL restore applies the validated SQL snapshot to the configured school database; take exams offline first and keep the automatic safety archive until you verify the restored data. Cloudflare R2 backup/restore procedures are described below.
+
 ### Cloud database backups (optional)
 
 The application can upload a backup ZIP to a private Cloudflare R2 bucket. It contains a consistent database snapshot and the contents of `uploads`. R2 encrypts objects at rest and protects transfers with TLS. Backups are retained for 30 days; the first upload runs when the application starts, followed by daily uploads at `CLOUD_BACKUP_HOUR` in the server's local time (default `2`, or 2:00 AM).
@@ -154,7 +164,7 @@ The hosted portal is separate from the school's local database. Teachers create 
 
 The school administrator may review questions at the hosted portal's `/admin/login` page even when the school server is offline, or sync submissions to the local app and review them there. Decisions made online are copied into the local submission list and question bank on the next successful **Administration → Online question submissions → Sync now**. Decisions made locally are sent back to the portal on sync, so teachers can see the result and rejection feedback. Approval adds a question to the local bank only; the administrator must separately add it to an exam and publish that exam.
 
-Online teacher accounts are synchronized with local teacher accounts during manual sync. A teacher created on either side can use the same username and password on both after syncing. Password changes and disabled-account status are synchronized too. If both copies have changed since their last successful sync, the app flags a conflict; an administrator must select **Keep local** or **Keep online** in the local submission/sync page. Newly imported online teachers have no local subject or class assignments: an administrator must assign both locally before they can access student results. Class assignments remain on the school server.
+Online teacher accounts are synchronized with local teacher accounts during manual sync. A teacher created on either side can use the same username and password on both after syncing; for a new local teacher, run **Sync now** after creating the account. Password hashes (not plaintext passwords) and disabled-account status are synchronized. If both copies have changed since their last successful sync, the app flags a conflict; an administrator must select **Keep local** or **Keep online** in the local submission/sync page. Newly imported online teachers have no local subject or class assignments: an administrator must assign both locally before they can access student results. Class assignments remain on the school server.
 
 The school name and logo configured in local **Administration → School setup** are sent to the portal on **Online question submissions → Sync now**. The portal uses the synced name in its header and link-preview title/description. Its preview logo is available at one HTTPS portal image route; the underlying S3/R2 bucket remains private. Logos must be PNG, JPG, or WEBP and no larger than 4 MB to sync.
 
@@ -297,7 +307,7 @@ bolu, Bolu Yusuf,StudentPass2,SS2 A
 
 `full_name`, `password`, and `class_name` are required. `username` is optional; if omitted, the system creates one from the student's name. Students are grouped by `class_name` for ranking reports.
 
-Administrators can generate separate access codes for teacher and student registration. New codes use a memorable word pair plus a short random suffix, are role-specific, do not depend on subject, and stop working once their configured duration expires. Existing shared access codes are migrated as student codes; generate new teacher codes for teacher registration.
+Administrators can generate separate access codes for teacher and student registration. New codes use a memorable word pair plus a short random suffix, are role-specific, do not depend on subject, stop working at expiry, and are automatically deleted by the running app. Existing shared access codes are migrated as student codes; generate new teacher codes for teacher registration.
 
 Administrators can configure a shared password for teacher accounts from **Administration**. Setting or changing it resets the password for all existing teachers and applies it to future teacher registrations; student passwords are unaffected. New teachers are shown their sign-in username after registration. Because teachers share this password, distribute it securely and change it promptly if it is exposed.
 
@@ -306,7 +316,7 @@ Ready-to-upload examples are included in:
 - `sample_data/students_sample.csv`
 - `sample_data/teachers_sample.csv`
 
-Names entered during registration, manual account creation, and CSV imports have extra whitespace normalized and all-uppercase/all-lowercase words converted to standard capitalization (for example, `ada okafor` becomes `Ada Okafor`). Existing mixed-case name parts are preserved, and names containing digits are rejected. The sample accounts use intentionally simple test passwords and should only be used in a local test environment. Teacher imports require `full_name` and `password`; `username`, `subjects`, and `classes` are optional. The `subjects` and `classes` columns accept pipe-separated values, for example `Biology|Chemistry` and `SS1 A|SS2 B`. Teachers see student results only when both the subject and class are assigned. Imported online teacher accounts start with no local assignments; an administrator must assign them in **Administration**.
+Names entered during registration, manual account creation, and CSV imports have extra whitespace normalized and all-uppercase/all-lowercase words converted to standard capitalization (for example, `ada okafor` becomes `Ada Okafor`). Existing mixed-case name parts are preserved, and names containing digits are rejected. The sample accounts use intentionally simple test passwords and should only be used in a local test environment. Teacher imports require `full_name`, `password`, and at least one class in `classes` or `class_name`; `username` and `subjects` are optional. The `subjects` and class columns accept pipe-separated values, for example `Biology|Chemistry` and `SS1|SS2`. Manually created teachers must also have at least one configured class assigned. Teachers see student results only when both the subject and class are assigned. Imported online teacher accounts start with no local assignments; an administrator must assign them in **Administration**.
 
 ## Student rankings, exam timer, and answer recovery
 
@@ -442,4 +452,4 @@ The `admin` / `admin123` account is created only when the application database h
 
 ### Where are local backups, and how do I restore them?
 
-The default SQLite database is `assessment.db` in the project folder; uploaded files are in `uploads`. Stop the app before copying a manual backup. For MySQL or R2 backup/restore steps, see [Cloud database backups](#cloud-database-backups-optional) and [First-time MySQL setup on Windows](#first-time-mysql-setup-on-windows). Keep at least one backup separate from the server and test restoration before relying on it.
+Create and restore a local archive in **Administration → Local backups**; the archive stays on the school server unless an administrator downloads it. SQLite uses `assessment.db`; MySQL uses the configured school database. Uploaded files are in `uploads`. In-app restore validates the archive and makes a safety copy, but replaces current data, so take exams offline first. For R2 backup/restore steps, see [Cloud database backups](#cloud-database-backups-optional). Keep at least one backup separate from the server and test restoration before relying on it.

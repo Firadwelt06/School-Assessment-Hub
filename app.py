@@ -8,7 +8,7 @@ import socket
 import sqlite3
 import time
 import unicodedata
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 
@@ -16,6 +16,7 @@ import pandas as pd
 from flask import Flask, flash, jsonify, redirect, render_template, request, send_file, session, url_for
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
+from local_backup import LocalBackupError, build_local_backup, restore_local_backup
 from cloud_sync import (
     PortalSyncError,
     resolve_teacher_account_conflict,
@@ -52,6 +53,8 @@ except ImportError:
     DictCursor = None
 
 DBIntegrityError = (sqlite3.IntegrityError, pymysql.err.IntegrityError) if pymysql else (sqlite3.IntegrityError,)
+DB_OPERATION_ERRORS = (sqlite3.Error, pymysql.MySQLError) if pymysql else (sqlite3.Error,)
+LOCAL_BACKUP_ERRORS = (LocalBackupError, OSError) + DB_OPERATION_ERRORS
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -60,6 +63,7 @@ DB_ENGINE = os.getenv("DB_ENGINE", "sqlite").lower()
 DB_PATH = os.getenv("DATABASE_PATH", str(BASE_DIR / "assessment.db"))
 UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
+LOCAL_BACKUP_DIR = Path(os.getenv("LOCAL_BACKUP_DIR", str(BASE_DIR / "local_backups")))
 ALLOWED_NOTES = {"pdf", "docx"}
 ALLOWED_LOGOS = {"png", "jpg", "jpeg", "webp"}
 ALLOWED_IMAGES = {"png", "jpg", "jpeg", "webp", "gif"}
@@ -679,6 +683,7 @@ def teacher_username(full_name):
 
 
 def valid_access_code(code, role):
+    delete_expired_access_codes()
     record = query(
         "SELECT * FROM subject_access_codes WHERE UPPER(code) = ? AND role = ? AND active = 1 ORDER BY id DESC",
         (code.strip().upper(), role), one=True,
@@ -722,9 +727,40 @@ def generate_access_code():
 
 def access_code_is_expired(expires_at):
     try:
-        return datetime.now() > datetime.fromisoformat(expires_at)
-    except ValueError:
+        expiry = datetime.fromisoformat(expires_at)
+        now = datetime.now(expiry.tzinfo) if expiry.tzinfo else datetime.now()
+        return now >= expiry
+    except (TypeError, ValueError):
         return True
+
+
+def delete_expired_access_codes():
+    expired_ids = [
+        row["id"]
+        for row in query("SELECT id, expires_at FROM subject_access_codes")
+        if access_code_is_expired(row["expires_at"])
+    ]
+    for code_id in expired_ids:
+        execute("DELETE FROM subject_access_codes WHERE id = ?", (code_id,))
+    return len(expired_ids)
+
+
+def start_access_code_cleanup_scheduler():
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(
+        delete_expired_access_codes,
+        trigger="interval",
+        minutes=10,
+        id="delete-expired-access-codes",
+        replace_existing=True,
+        next_run_time=datetime.now(),
+        coalesce=True,
+        max_instances=1,
+    )
+    scheduler.start()
+    return scheduler
 
 
 def find_student_by_name(full_name):
@@ -1928,6 +1964,189 @@ def results_csv():
     return send_file(download, mimetype="text/csv", as_attachment=True, download_name=f"student-results-{suffix}.csv")
 
 
+def completed_result_records(user, class_filter="", subject_filter="", exam_type_filter=""):
+    rows = query(
+        """SELECT a.id, u.full_name, u.username, u.class_name, e.title, e.subject,
+        e.exam_type, a.score, a.total, a.submitted_at
+        FROM attempts a
+        JOIN users u ON u.id = a.student_id
+        JOIN exams e ON e.id = a.exam_id
+        WHERE u.role = 'student' AND a.submitted_at != ''
+        ORDER BY a.submitted_at DESC, u.class_name, u.full_name"""
+    )
+    records = [dict(row) for row in rows]
+    if user["role"] == "teacher":
+        allowed_subjects = set(teacher_subjects(user))
+        allowed_classes = set(teacher_classes(user))
+        records = [
+            row for row in records
+            if row["subject"] in allowed_subjects and row["class_name"] in allowed_classes
+        ]
+    if class_filter:
+        records = [row for row in records if class_matches(row["class_name"], class_filter)]
+    if subject_filter:
+        records = [row for row in records if row["subject"] == subject_filter]
+    if exam_type_filter in EXAM_TYPES:
+        records = [row for row in records if row["exam_type"] == exam_type_filter]
+    for record in records:
+        record["percentage"] = round(record["score"] / record["total"] * 100, 1) if record["total"] else 0
+    return records
+
+
+@app.get("/reports/results")
+@login_required("admin", "teacher")
+def staff_results():
+    user = current_user()
+    class_filter = request.args.get("class_name", "").strip()
+    subject_filter = request.args.get("subject", "").strip()
+    exam_type_filter = request.args.get("exam_type", "").strip()
+    records = completed_result_records(user, class_filter, subject_filter, exam_type_filter)
+    if user["role"] == "teacher":
+        classes = teacher_classes(user)
+        subjects = teacher_subjects(user)
+    else:
+        classes = class_options()
+        subjects = [row["subject"] for row in query(
+            """SELECT DISTINCT e.subject FROM exams e JOIN attempts a ON a.exam_id = e.id
+            WHERE a.submitted_at != '' ORDER BY e.subject"""
+        )]
+    classes = sorted(set(classes + [class_group(value) for value in classes]))
+    return render_template(
+        "results.html",
+        results=records,
+        classes=classes,
+        subjects=subjects,
+        exam_types=EXAM_TYPES,
+        class_filter=class_filter,
+        subject_filter=subject_filter,
+        exam_type_filter=exam_type_filter,
+    )
+
+
+@app.get("/reports/results/details.csv")
+@login_required("admin", "teacher")
+def results_detail_csv():
+    user = current_user()
+    records = completed_result_records(
+        user,
+        request.args.get("class_name", "").strip(),
+        request.args.get("subject", "").strip(),
+        request.args.get("exam_type", "").strip(),
+    )
+    output = io.StringIO()
+    columns = [
+        "submitted_at", "class_name", "full_name", "username", "title",
+        "subject", "exam_type", "score", "total", "percentage",
+    ]
+    frame = pd.DataFrame(records, columns=["id", *columns])
+    frame[columns].to_csv(output, index=False)
+    download = io.BytesIO(output.getvalue().encode("utf-8-sig"))
+    return send_file(
+        download,
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name="student-results-detail.csv",
+    )
+
+
+def available_local_backups():
+    if not LOCAL_BACKUP_DIR.is_dir():
+        return []
+    backup_pattern = re.compile(r"assessment-local-backup-\d{8}T\d{12}Z\.zip")
+    backups = []
+    for path in LOCAL_BACKUP_DIR.iterdir():
+        if path.is_file() and not path.is_symlink() and backup_pattern.fullmatch(path.name):
+            backups.append({"name": path.name, "size": path.stat().st_size})
+    return sorted(backups, key=lambda item: item["name"], reverse=True)
+
+
+def local_backup_path(filename):
+    if not re.fullmatch(r"assessment-local-backup-\d{8}T\d{12}Z\.zip", filename):
+        return None
+    path = LOCAL_BACKUP_DIR / filename
+    if path.is_symlink() or not path.is_file() or path.parent.resolve() != LOCAL_BACKUP_DIR.resolve():
+        return None
+    return path
+
+
+@app.post("/admin/backups/create")
+@login_required("admin")
+def create_local_backup():
+    if DB_ENGINE not in {"sqlite", "mysql"}:
+        flash("In-app local backup is not available for this database engine.", "error")
+        return redirect(url_for("admin", _anchor="local-backups"))
+    LOCAL_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"assessment-local-backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}.zip"
+    destination = LOCAL_BACKUP_DIR / filename
+    try:
+        build_local_backup(DB_ENGINE, DB_PATH, db, UPLOAD_DIR, destination)
+    except LOCAL_BACKUP_ERRORS as error:
+        if destination.exists():
+            destination.unlink()
+        flash(f"Local backup could not be created: {error}", "error")
+    else:
+        flash(f"Local backup created: {filename}", "success")
+    return redirect(url_for("admin", _anchor="local-backups"))
+
+
+@app.get("/admin/backups/<filename>")
+@login_required("admin")
+def download_local_backup(filename):
+    path = local_backup_path(filename)
+    if path is None:
+        flash("Local backup not found.", "error")
+        return redirect(url_for("admin", _anchor="local-backups"))
+    return send_file(path, mimetype="application/zip", as_attachment=True, download_name=path.name)
+
+
+@app.post("/admin/backups/restore")
+@login_required("admin")
+def restore_school_backup():
+    if DB_ENGINE not in {"sqlite", "mysql"}:
+        flash("In-app local restore is not available for this database engine.", "error")
+        return redirect(url_for("admin", _anchor="local-backups"))
+    if not secrets.compare_digest(request.form.get("restore_confirmation", ""), "RESTORE"):
+        flash("Type RESTORE to confirm before replacing school data.", "error")
+        return redirect(url_for("admin", _anchor="local-backups"))
+    filename = request.form.get("backup_name", "")
+    source = local_backup_path(filename)
+    if source is None:
+        flash("Choose an available local backup.", "error")
+        return redirect(url_for("admin", _anchor="local-backups"))
+
+    LOCAL_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    safety_filename = f"assessment-local-backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}.zip"
+    safety_path = LOCAL_BACKUP_DIR / safety_filename
+    safety_backup_created = False
+    try:
+        build_local_backup(DB_ENGINE, DB_PATH, db, UPLOAD_DIR, safety_path)
+        safety_backup_created = True
+        restore_local_backup(DB_ENGINE, DB_PATH, db, UPLOAD_DIR, source)
+    except LOCAL_BACKUP_ERRORS as error:
+        if not safety_backup_created and safety_path.exists():
+            safety_path.unlink()
+        recovery_error = None
+        if safety_backup_created and DB_ENGINE == "mysql":
+            try:
+                restore_local_backup(DB_ENGINE, DB_PATH, db, UPLOAD_DIR, safety_path)
+            except LOCAL_BACKUP_ERRORS as restore_error:
+                recovery_error = restore_error
+        message = f"Restore did not complete: {error}. Pre-restore backup: {safety_filename}."
+        if safety_backup_created and DB_ENGINE == "mysql" and not recovery_error:
+            message += " The pre-restore database and uploads were restored automatically."
+        elif recovery_error:
+            message += f" Automatic recovery also failed: {recovery_error}."
+        flash(message, "error")
+        return redirect(url_for("admin", _anchor="local-backups"))
+
+    session.clear()
+    flash(
+        f"Restore completed. A pre-restore safety copy was saved as {safety_filename}. Sign in again.",
+        "success",
+    )
+    return redirect(url_for("login"))
+
+
 @app.route("/admin", methods=["GET", "POST"])
 @login_required("admin")
 def admin():
@@ -1984,7 +2203,48 @@ def admin():
                 role = request.form["role"]
                 class_name = request.form.get("class_name", "").strip() if role == "student" else ""
                 full_name = format_person_name(request.form["full_name"])
-                execute("INSERT INTO users(username, full_name, password_hash, role, class_name, subjects, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", (request.form["username"].strip(), full_name, hash_password(request.form["password"]), role, class_name, request.form.get("subjects", "").strip(), datetime.now().isoformat(timespec="seconds")))
+                teacher_classes_selected = list(dict.fromkeys(
+                    value.strip() for value in request.form.getlist("teacher_classes") if value.strip()
+                ))
+                if role == "teacher":
+                    if not teacher_classes_selected:
+                        raise ValueError("Assign at least one class to the new teacher.")
+                    if any(value not in set(class_options()) for value in teacher_classes_selected):
+                        raise ValueError("Choose only classes configured by the school administrator.")
+                connection = db()
+                try:
+                    if DB_ENGINE == "mysql":
+                        connection.begin()
+                    else:
+                        connection.execute("BEGIN IMMEDIATE")
+                    cursor = execute_on_connection(
+                        connection,
+                        """INSERT INTO users
+                        (username, full_name, password_hash, role, class_name, subjects, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            request.form["username"].strip(),
+                            full_name,
+                            hash_password(request.form["password"]),
+                            role,
+                            class_name,
+                            request.form.get("subjects", "").strip() if role == "teacher" else "",
+                            datetime.now().isoformat(timespec="seconds"),
+                        ),
+                    )
+                    if role == "teacher":
+                        for assigned_class in teacher_classes_selected:
+                            execute_on_connection(
+                                connection,
+                                "INSERT INTO teacher_class_assignments(teacher_id, class_name) VALUES (?, ?)",
+                                (cursor.lastrowid, assigned_class),
+                            )
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+                finally:
+                    connection.close()
                 flash("User created.", "success")
             except ValueError as error:
                 flash(str(error), "error")
@@ -2032,16 +2292,30 @@ def admin():
                     frame = pd.read_csv(upload).fillna("")
                     required = {"full_name", "password"}
                     if not required.issubset(frame.columns):
-                        raise ValueError("Teacher CSV columns must include full_name and password. username, subjects, and classes are optional.")
+                        raise ValueError("Teacher CSV columns must include full_name and password.")
+                    if not {"classes", "class_name"}.intersection(frame.columns):
+                        raise ValueError("Teacher CSV must include a classes or class_name column.")
                     names = [format_person_name(str(row["full_name"])) for row in frame.to_dict("records")]
-                    created = 0
+                    prepared = []
+                    allowed_classes = set(class_options())
                     for row, full_name in zip(frame.to_dict("records"), names):
                         username = str(row.get("username", "")).strip() or re.sub(r"[^a-z0-9]+", ".", full_name.lower()).strip(".")
-                        assigned_classes = list(dict.fromkeys(
-                            value.strip() for value in str(row.get("classes", "")).split("|") if value.strip()
-                        ))
-                        if any(value not in set(class_options()) for value in assigned_classes):
+                        class_values = []
+                        for column in ("classes", "class_name"):
+                            if column in row:
+                                class_values.extend(
+                                    value.strip()
+                                    for value in str(row[column]).split("|")
+                                    if value.strip()
+                                )
+                        assigned_classes = list(dict.fromkeys(class_values))
+                        if not assigned_classes:
+                            raise ValueError(f"Teacher {username} must have at least one assigned class.")
+                        if any(value not in allowed_classes for value in assigned_classes):
                             raise ValueError(f"Teacher {username} has a class not configured in school settings.")
+                        prepared.append((row, full_name, username, assigned_classes))
+                    created = 0
+                    for row, full_name, username, assigned_classes in prepared:
                         teacher_id = execute(
                             """INSERT INTO users(username, full_name, password_hash, role, class_name, subjects, created_at)
                             VALUES (?, ?, ?, 'teacher', ?, ?, ?)""",
@@ -2155,6 +2429,7 @@ def admin():
         return redirect(url_for("admin"))
 
     role_filter = request.args.get("role", "").strip()
+    delete_expired_access_codes()
     class_filter = request.args.get("class_name", "").strip()
     exam_subject_filter = request.args.get("exam_subject", "").strip()
     exam_class_filter = request.args.get("exam_class", "").strip()
@@ -2164,9 +2439,24 @@ def admin():
     if role_filter in ("teacher", "student"):
         user_sql += " AND role = ?"
         user_params.append(role_filter)
-    if class_filter:
+    if class_filter and role_filter == "teacher":
+        user_sql += """ AND EXISTS (
+            SELECT 1 FROM teacher_class_assignments tca
+            WHERE tca.teacher_id = users.id AND tca.class_name = ?
+        )"""
+        user_params.append(class_filter)
+    elif class_filter and role_filter == "student":
         user_sql += " AND class_name = ?"
         user_params.append(class_filter)
+    elif class_filter:
+        user_sql += """ AND (
+            (role = 'student' AND class_name = ?)
+            OR (role = 'teacher' AND EXISTS (
+                SELECT 1 FROM teacher_class_assignments tca
+                WHERE tca.teacher_id = users.id AND tca.class_name = ?
+            ))
+        )"""
+        user_params.extend((class_filter, class_filter))
     user_sql += " ORDER BY id"
     exam_sql = "SELECT id, title, subject, class_name, exam_type, duration_minutes, published FROM exams WHERE 1=1"
     exam_params = []
@@ -2220,6 +2510,8 @@ def admin():
         ],
         exams=exams,
         exam_types=EXAM_TYPES,
+        local_backups=available_local_backups(),
+        local_backup_supported=DB_ENGINE in {"sqlite", "mysql"},
     )
 
 
@@ -2533,9 +2825,18 @@ if __name__ == "__main__":
     port = APP_PORT
     if os.getenv("FLASK_DEBUG") == "1":
         if os.getenv("WERKZEUG_RUN_MAIN") == "true":
-            start_cloud_backup_scheduler(DB_ENGINE, DB_PATH, db, UPLOAD_DIR)
-        app.run(host=host, port=port, debug=True)
+            access_code_scheduler = start_access_code_cleanup_scheduler()
+            backup_scheduler = start_cloud_backup_scheduler(DB_ENGINE, DB_PATH, db, UPLOAD_DIR)
+            try:
+                app.run(host=host, port=port, debug=True)
+            finally:
+                access_code_scheduler.shutdown(wait=True)
+                if backup_scheduler:
+                    backup_scheduler.shutdown(wait=True)
+        else:
+            app.run(host=host, port=port, debug=True)
     else:
+        access_code_scheduler = start_access_code_cleanup_scheduler()
         backup_scheduler = start_cloud_backup_scheduler(DB_ENGINE, DB_PATH, db, UPLOAD_DIR)
         from waitress import serve
         zeroconf = None
@@ -2572,6 +2873,7 @@ if __name__ == "__main__":
         try:
             serve(app, host=host, port=port, threads=int(os.getenv("WAITRESS_THREADS", "8")))
         finally:
+            access_code_scheduler.shutdown(wait=True)
             if backup_scheduler:
                 backup_scheduler.shutdown(wait=True)
             if zeroconf and service_info:
