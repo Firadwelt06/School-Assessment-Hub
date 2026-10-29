@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ school.school_name }} · Assessment Hub</title>
+  {% if school.school_logo %}<link rel="icon" href="{{ url_for('uploads', filename=school.school_logo) }}">{% endif %}
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <script>
     window.MathJax = {tex: {inlineMath: [['\\(', '\\)']], displayMath: [['\\[', '\\]']]}};

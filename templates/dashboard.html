@@ -1,7 +1,9 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="topbar"><div><div class="eyebrow">OVERVIEW</div><h1>Good day, {{ user.full_name.split(' ')[0] }}</h1><p class="muted">Manage assessments and monitor learning progress.</p></div><span class="role-pill">{{ user.role|upper }}</span></div>
+<div class="topbar"><div><div class="eyebrow">OVERVIEW</div><h1>Good day, {{ user.full_name.split(' ')[0] }}</h1><p class="muted">{% if user.role == 'student' %}Choose an available examination to get started.{% else %}Manage assessments and monitor learning progress.{% endif %}</p></div><span class="role-pill">{{ user.role|upper }}</span></div>
+{% if user.role in ['admin', 'teacher'] %}
 <div class="stats"><div class="stat"><span>Question bank</span><strong>{{ stats.questions }}</strong></div><div class="stat"><span>Exams</span><strong>{{ stats.exams }}</strong></div><div class="stat"><span>Submissions</span><strong>{{ stats.attempts }}</strong></div></div>
+{% endif %}
 {% if user.role == 'student' %}
 <section class="panel"><div class="section-title"><h2>Before you start</h2></div><p>Confirm your name and class, read each question carefully, and keep the countdown visible. Your exam is automatically submitted when time expires. Results are available to authorized teachers and administrators.</p></section>
 <section class="panel"><div class="section-title"><h2>Available examinations</h2><span class="muted">Select an exam to begin</span></div>

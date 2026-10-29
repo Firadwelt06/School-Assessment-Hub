@@ -532,6 +532,59 @@ class QuestionSubmissionAdminTests(unittest.TestCase):
                 ( "scope.teacher", *inserted_usernames),
             )
 
+    def test_student_dashboard_hides_staff_navigation_and_summary_stats(self):
+        student_id = assessment_app.execute(
+            """INSERT INTO users
+            (username, full_name, password_hash, role, class_name, active, created_at)
+            VALUES (?, ?, ?, 'student', ?, 1, ?)""",
+            (
+                "dashboard.student",
+                "Dashboard Student",
+                assessment_app.hash_password("StudentPass123"),
+                "SS1",
+                "2026-10-15T12:00:00",
+            ),
+        )
+        with self.client.session_transaction() as session:
+            session["user_id"] = student_id
+
+        try:
+            response = self.client.get("/dashboard")
+            page = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("Available examinations", page)
+            self.assertIn("Choose an available examination to get started.", page)
+            for staff_label in (
+                "Question bank",
+                "Student Rankings",
+                "Student Results",
+                "Performance Analytics",
+                "Administration",
+                "Create exam",
+                "Submissions",
+            ):
+                self.assertNotIn(staff_label, page)
+        finally:
+            assessment_app.execute("DELETE FROM users WHERE id = ?", (student_id,))
+
+    def test_school_logo_is_used_as_browser_tab_icon(self):
+        with assessment_app.app.test_request_context("/"):
+            page = assessment_app.app.jinja_env.get_template("base.html").render(
+                school={
+                    "school_name": "Test School",
+                    "school_logo": "school-logo.png",
+                    "theme": "ocean",
+                    "theme_image": "",
+                },
+                user=None,
+            )
+
+        self.assertIn(
+            '<link rel="icon" href="/uploads/school-logo.png">',
+            page,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

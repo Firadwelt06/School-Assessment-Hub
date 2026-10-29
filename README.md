@@ -249,6 +249,8 @@ Start-Process PowerShell -Verb RunAs -ArgumentList '-ExecutionPolicy Bypass -Fil
 
 Replace `192.168.1.4` with the server's current IPv4 address. The command opens an elevated PowerShell window because Windows protects the hosts file. Allow Python/port 5000 through Windows Firewall when prompted. This hosts-file method must be run on every Windows client; it does not configure Android or other devices. Everyone must be connected to the same private network; guest Wi-Fi isolation can prevent devices from seeing the host. Change `APP_HOSTNAME` in `.env` to the name the school wants to use. If the router supports local DNS/host records, adding the same hostname there is preferable because it works for all devices and continues to work after the server receives a new IP.
 
+The server refreshes its `.local` service advertisement when its LAN IPv4 address changes. If clients use a manually configured hosts-file entry or a saved IP address, update that entry after a network change; reserving the server's address in the router is the most reliable way to keep those addresses stable.
+
 ## First-time MySQL setup on Windows
 
 Open MySQL Workbench or the MySQL command line and create the database and application user. Replace the example password with your own strong password:

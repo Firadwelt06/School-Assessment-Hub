@@ -4,7 +4,6 @@ import json
 import os
 import re
 import secrets
-import socket
 import sqlite3
 import time
 import unicodedata
@@ -27,6 +26,7 @@ from cloud_sync import (
     sync_question_submissions,
     sync_school_branding,
 )
+from lan_discovery import LanDiscoveryError, LanServiceDiscovery
 
 try:
     from google import genai
@@ -75,19 +75,6 @@ APP_HOSTNAME = os.getenv("APP_HOSTNAME", "school-assessment.local").strip()
 ZEROCONF_ENABLED = os.getenv("ZEROCONF_ENABLED", "1").lower() in {"1", "true", "yes"}
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "change-this-development-secret")
-
-
-def get_advertised_ip():
-    """Return the address used to reach this computer from the active LAN."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-            probe.connect(("8.8.8.8", 80))
-            address = probe.getsockname()[0]
-            if not address.startswith("127."):
-                return address
-    except OSError:
-        pass
-    return socket.gethostbyname(socket.gethostname())
 
 
 def db():
@@ -2839,28 +2826,12 @@ if __name__ == "__main__":
         access_code_scheduler = start_access_code_cleanup_scheduler()
         backup_scheduler = start_cloud_backup_scheduler(DB_ENGINE, DB_PATH, db, UPLOAD_DIR)
         from waitress import serve
-        zeroconf = None
-        service_info = None
+        lan_discovery = None
         if ZEROCONF_ENABLED:
             try:
-                from zeroconf import ServiceInfo, Zeroconf
-
-                lan_ip = get_advertised_ip()
-                advertised_hostname = APP_HOSTNAME.rstrip(".")
-                if not advertised_hostname.endswith(".local"):
-                    advertised_hostname = f"{advertised_hostname}.local"
-                zeroconf = Zeroconf()
-                service_info = ServiceInfo(
-                    "_http._tcp.local.",
-                    "School Assessment._http._tcp.local.",
-                    addresses=[socket.inet_aton(lan_ip)],
-                    port=port,
-                    server=f"{advertised_hostname}.",
-                    properties={"path": "/"},
-                )
-                zeroconf.register_service(service_info)
+                lan_discovery = LanServiceDiscovery(port, APP_HOSTNAME)
                 print(f"LAN name: http://{APP_HOSTNAME}:{port}")
-            except (ImportError, OSError, ValueError) as error:
+            except (ImportError, OSError, ValueError, LanDiscoveryError) as error:
                 print(
                     f"LAN name discovery is unavailable: {error}. "
                     f"Use http://{APP_HOSTNAME}:{port} only after configuring DNS or the client hosts file."
@@ -2876,6 +2847,5 @@ if __name__ == "__main__":
             access_code_scheduler.shutdown(wait=True)
             if backup_scheduler:
                 backup_scheduler.shutdown(wait=True)
-            if zeroconf and service_info:
-                zeroconf.unregister_service(service_info)
-                zeroconf.close()
+            if lan_discovery:
+                lan_discovery.close()
