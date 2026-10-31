@@ -545,16 +545,28 @@ class QuestionSubmissionAdminTests(unittest.TestCase):
                 "2026-10-15T12:00:00",
             ),
         )
+        exam_id = assessment_app.execute(
+            """INSERT INTO exams
+            (title, subject, class_name, exam_type, duration_minutes, created_by, published, created_at)
+            VALUES (?, ?, ?, 'quiz', 30, ?, 1, ?)""",
+            ("Dashboard Exam", "Physics", "SS1", self.admin_id, "2026-10-15T12:00:00"),
+        )
         with self.client.session_transaction() as session:
             session["user_id"] = student_id
 
         try:
-            response = self.client.get("/dashboard")
+            response = self.client.get(
+                "/dashboard?subject=Chemistry&class_name=SS2&exam_type=midterm"
+            )
             page = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
             self.assertIn("Available examinations", page)
             self.assertIn("Choose an available examination to get started.", page)
+            self.assertIn("Dashboard Exam", page)
+            self.assertIn("student-start-exam", page)
+            self.assertNotIn("Filter available examinations", page)
+            self.assertNotIn("Filter exams", page)
             for staff_label in (
                 "Question bank",
                 "Student Rankings",
@@ -566,6 +578,7 @@ class QuestionSubmissionAdminTests(unittest.TestCase):
             ):
                 self.assertNotIn(staff_label, page)
         finally:
+            assessment_app.execute("DELETE FROM exams WHERE id = ?", (exam_id,))
             assessment_app.execute("DELETE FROM users WHERE id = ?", (student_id,))
 
     def test_school_logo_is_used_as_browser_tab_icon(self):

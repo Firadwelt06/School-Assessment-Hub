@@ -93,6 +93,16 @@ body:has(.login-shell) main:has(.flash){padding-top:18px}
 .button{transition:transform .15s ease,box-shadow .15s ease,background-color .15s ease}
 .button:hover{transform:translateY(-1px)}
 .exam-row{gap:18px}
+.student-exams .section-title{margin-bottom:24px}
+.student-exam-row{align-items:center;gap:24px;margin:0 0 16px;padding:22px;border:1px solid #c9dced;border-left:5px solid var(--blue);border-radius:10px;background:#f4f9fd;box-shadow:0 5px 16px #102a4310}
+.student-exam-row:last-of-type{margin-bottom:0}
+.student-exam-details{min-width:0}
+.student-exam-details strong{color:var(--navy);font-size:20px}
+.student-exam-details span{font-size:14px}
+.student-start-exam{display:flex;flex:0 0 auto;min-width:220px;min-height:64px;align-items:center;justify-content:center;gap:10px;padding:16px 24px;border-radius:9px;box-shadow:0 4px 12px #1769aa35;font-size:18px}
+.student-start-exam span{font-size:22px;line-height:1}
+.student-start-exam:hover{box-shadow:0 7px 17px #1769aa45}
+@media(max-width:650px){.student-exam-row{align-items:stretch;flex-direction:column;padding:18px}.student-start-exam{width:100%;min-width:0}}
 @media(max-width:850px){.login-shell{margin:-24px -16px;padding:22px}.login-card{min-height:0;grid-template-columns:1fr}.login-brand-panel{min-height:330px;padding:28px}.login-welcome{margin:38px 0 28px}.login-welcome h1{font-size:35px}.login-benefits{grid-template-columns:1fr 1fr;gap:13px}.login-benefits li:last-child{grid-column:1/-1}.login-form-panel{padding:38px 28px}}
 @media(max-width:520px){.login-shell{padding:12px}.login-card{border-radius:15px}.login-brand-panel{min-height:0;padding:23px}.login-welcome{margin:30px 0 25px}.login-welcome h1{font-size:30px}.login-benefits{grid-template-columns:1fr;gap:13px}.login-benefits li:last-child{grid-column:auto}.login-form-panel{padding:30px 22px}.login-register>div{display:grid;gap:8px}}
 @media(prefers-reduced-motion:reduce){.sidebar nav a,.button{transition:none}.sidebar nav a:hover,.button:hover{transform:none}}

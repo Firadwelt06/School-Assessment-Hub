@@ -1069,15 +1069,16 @@ def dashboard():
     status_filter = request.args.get("status", "").strip()
     exam_sql = "SELECT e.*, COUNT(eq.question_id) AS question_count FROM exams e LEFT JOIN exam_questions eq ON eq.exam_id=e.id WHERE 1=1"
     exam_params = []
-    if subject_filter:
-        exam_sql += " AND e.subject = ?"
-        exam_params.append(subject_filter)
-    if exam_type_filter in EXAM_TYPES:
-        exam_sql += " AND e.exam_type = ?"
-        exam_params.append(exam_type_filter)
-    if status_filter in ("published", "draft"):
-        exam_sql += " AND e.published = ?"
-        exam_params.append(int(status_filter == "published"))
+    if user["role"] != "student":
+        if subject_filter:
+            exam_sql += " AND e.subject = ?"
+            exam_params.append(subject_filter)
+        if exam_type_filter in EXAM_TYPES:
+            exam_sql += " AND e.exam_type = ?"
+            exam_params.append(exam_type_filter)
+        if status_filter in ("published", "draft"):
+            exam_sql += " AND e.published = ?"
+            exam_params.append(int(status_filter == "published"))
     if user["role"] == "student":
         exam_sql += " AND e.published = 1"
         exam_sql += " AND (e.class_name = '' OR e.class_name = ? OR e.class_name = ?)"
@@ -1092,7 +1093,7 @@ def dashboard():
             exam_params.append(user["id"])
     exam_sql += " GROUP BY e.id ORDER BY e.id DESC"
     exams = query(exam_sql, exam_params)
-    if class_filter:
+    if class_filter and user["role"] != "student":
         exams = [exam for exam in exams if class_matches(exam["class_name"], class_filter)]
     recent_attempts = []
     if user["role"] in ("admin", "teacher"):
