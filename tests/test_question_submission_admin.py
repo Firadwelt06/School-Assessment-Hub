@@ -532,6 +532,127 @@ class QuestionSubmissionAdminTests(unittest.TestCase):
                 ( "scope.teacher", *inserted_usernames),
             )
 
+    def test_student_results_filter_selects_individual_class_arm(self):
+        student_ids = []
+        exam_ids = []
+        for index, (username, name, class_name) in enumerate(
+            [
+                ("class.filter.student.a", "Class Arm A Student", "SS1A"),
+                ("class.filter.student.b", "Class Arm B Student", "SS1B"),
+            ]
+        ):
+            student_id = assessment_app.execute(
+                """INSERT INTO users
+                (username, full_name, password_hash, role, class_name, active, created_at)
+                VALUES (?, ?, ?, 'student', ?, 1, ?)""",
+                (
+                    username,
+                    name,
+                    assessment_app.hash_password("StudentPass123"),
+                    class_name,
+                    "2026-10-15T12:00:00",
+                ),
+            )
+            student_ids.append(student_id)
+            exam_id = assessment_app.execute(
+                """INSERT INTO exams
+                (title, subject, class_name, exam_type, duration_minutes, created_by, published, created_at)
+                VALUES (?, ?, 'SS1', 'quiz', 30, ?, 1, ?)""",
+                (f"Class Filter Exam {index}", "Biology", self.admin_id, "2026-10-15T12:00:00"),
+            )
+            exam_ids.append(exam_id)
+            assessment_app.execute(
+                """INSERT INTO attempts
+                (exam_id, student_id, score, total, started_at, submitted_at)
+                VALUES (?, ?, 8, 10, ?, ?)""",
+                (exam_id, student_id, "2026-10-16T11:30:00", "2026-10-16T12:00:00"),
+            )
+
+        try:
+            arm_results = self.client.get(
+                "/reports/results?class_name=SS1A"
+            ).get_data(as_text=True)
+            cohort_results = self.client.get(
+                "/reports/results?class_name=SS1"
+            ).get_data(as_text=True)
+
+            self.assertIn("Class Arm A Student", arm_results)
+            self.assertNotIn("Class Arm B Student", arm_results)
+            self.assertIn("Class Arm A Student", cohort_results)
+            self.assertIn("Class Arm B Student", cohort_results)
+        finally:
+            assessment_app.execute(
+                "DELETE FROM attempts WHERE student_id IN (?, ?)",
+                student_ids,
+            )
+            assessment_app.execute(
+                "DELETE FROM exams WHERE id IN (?, ?)",
+                exam_ids,
+            )
+            assessment_app.execute(
+                "DELETE FROM users WHERE id IN (?, ?)",
+                student_ids,
+            )
+
+    def test_student_rankings_show_one_filtered_aggregate_table(self):
+        student_ids = []
+        exam_ids = []
+        for index, (username, name, subject) in enumerate(
+            [
+                ("ranking.filter.student.bio", "Biology Ranking Student", "Biology"),
+                ("ranking.filter.student.phy", "Physics Ranking Student", "Physics"),
+            ]
+        ):
+            student_id = assessment_app.execute(
+                """INSERT INTO users
+                (username, full_name, password_hash, role, class_name, active, created_at)
+                VALUES (?, ?, ?, 'student', 'SS1', 1, ?)""",
+                (
+                    username,
+                    name,
+                    assessment_app.hash_password("StudentPass123"),
+                    "2026-10-15T12:00:00",
+                ),
+            )
+            student_ids.append(student_id)
+            exam_id = assessment_app.execute(
+                """INSERT INTO exams
+                (title, subject, class_name, exam_type, duration_minutes, created_by, published, created_at)
+                VALUES (?, ?, 'SS1', 'quiz', 30, ?, 1, ?)""",
+                (f"Ranking Filter Exam {index}", subject, self.admin_id, "2026-10-15T12:00:00"),
+            )
+            exam_ids.append(exam_id)
+            assessment_app.execute(
+                """INSERT INTO attempts
+                (exam_id, student_id, score, total, started_at, submitted_at)
+                VALUES (?, ?, 8, 10, ?, ?)""",
+                (exam_id, student_id, "2026-10-16T11:30:00", "2026-10-16T12:00:00"),
+            )
+
+        try:
+            page = self.client.get(
+                "/rankings?class_name=SS1&subject=Biology&exam_type=quiz"
+            ).get_data(as_text=True)
+
+            self.assertEqual(page.count("<table>"), 1)
+            self.assertIn("Biology Ranking Student", page)
+            self.assertNotIn("Physics Ranking Student", page)
+            self.assertIn("Combined score and percentage", page)
+            self.assertNotIn('name="scope"', page)
+        finally:
+            assessment_app.execute(
+                "DELETE FROM attempts WHERE student_id IN (?, ?)",
+                student_ids,
+            )
+            assessment_app.execute(
+                "DELETE FROM exams WHERE id IN (?, ?)",
+                exam_ids,
+            )
+            assessment_app.execute(
+                "DELETE FROM users WHERE id IN (?, ?)",
+                student_ids,
+            )
+
     def test_student_dashboard_hides_staff_navigation_and_summary_stats(self):
         student_id = assessment_app.execute(
             """INSERT INTO users

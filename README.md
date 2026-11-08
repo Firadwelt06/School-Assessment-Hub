@@ -324,7 +324,7 @@ Names entered during registration, manual account creation, and CSV imports have
 
 ## Student rankings, exam timer, and answer recovery
 
-Teachers and administrators can open **Student Rankings** to see subject rankings within each class and overall rankings within each class. The class filter also offers combined cohorts such as `SS1`, which combines `SS1 A`, `SS1 B`, and similar sections. Rankings can be narrowed by subject, exam type, and subject/overall view.
+Teachers and administrators can open **Student Rankings** to compare students within each class by combined score and percentage across the selected completed examinations. Class/cohort, subject, and exam-type filters determine which results contribute to each student's ranking. The class filter also offers combined cohorts such as `SS1`, which combines `SS1 A`, `SS1 B`, and similar sections.
 
 During an exam, each answer is saved to that student's active attempt while connected. Refreshing or reopening the exam restores server-saved answers and does not reset the server-recorded timer. If the network drops, the page keeps a local recovery draft in that browser and syncs it after reconnection; the save indicator shows whether changes have reached the server. Students can use the question navigator to jump between questions and see answered/unanswered progress. Teachers and administrators see recent attempt state on their dashboard; elapsed attempts are finalized when the student reconnects or reopens the exam.
 

@@ -625,7 +625,7 @@ def class_arm_options():
 
 
 def class_matches(value, selected):
-    return not selected or value == selected or class_group(value) == class_group(selected)
+    return not selected or value == selected or class_group(value) == selected
 
 
 def normalized_name(value):
@@ -896,7 +896,6 @@ def ranking_tables():
     class_filter = request.args.get("class_name", "").strip()
     subject_filter = request.args.get("subject", "").strip()
     exam_type_filter = request.args.get("exam_type", "").strip()
-    ranking_scope = request.args.get("scope", "all")
     rows = [
         {**dict(row), "class_group": class_group(row["class_name"])}
         for row in rows
@@ -916,22 +915,13 @@ def ranking_tables():
     if exam_type_filter in EXAM_TYPES:
         rows = [row for row in rows if row["exam_type"] == exam_type_filter]
     if not rows:
-        return [], []
+        return []
     data = pd.DataFrame([dict(row) for row in rows])
     if class_filter and any(row["class_name"] != class_filter for row in rows):
         data["ranking_class"] = data["class_group"]
     else:
         data["ranking_class"] = data["class_name"]
     data["percentage"] = (data["score"] / data["total"] * 100).round(1)
-    subject = data.groupby(["ranking_class", "subject", "full_name"], as_index=False).agg(
-        score=("score", "sum"), total=("total", "sum")
-    )
-    subject = subject.rename(columns={"ranking_class": "class_name"})
-    subject["percentage"] = (subject["score"] / subject["total"] * 100).round(1)
-    subject["rank"] = subject.groupby(["class_name", "subject"])["percentage"].rank(
-        method="min", ascending=False
-    ).astype(int)
-    subject = subject.sort_values(["class_name", "subject", "rank", "full_name"])
     overall = data.groupby(["ranking_class", "full_name"], as_index=False).agg(
         score=("score", "sum"), total=("total", "sum")
     )
@@ -941,10 +931,7 @@ def ranking_tables():
         method="min", ascending=False
     ).astype(int)
     overall = overall.sort_values(["class_name", "rank", "full_name"])
-    return (
-        [] if ranking_scope == "overall" else subject.to_dict("records"),
-        [] if ranking_scope == "subject" else overall.to_dict("records"),
-    )
+    return overall.to_dict("records")
 
 
 @app.context_processor
@@ -1807,17 +1794,16 @@ def grant_rewrite(attempt_id):
 @app.route("/rankings")
 @login_required("admin", "teacher")
 def rankings():
-    subject_rows, overall_rows = ranking_tables()
+    overall_rows = ranking_tables()
     class_values = [row["class_name"] for row in query("SELECT DISTINCT class_name FROM users WHERE role='student' AND class_name != ''")]
     user = current_user()
     if user["role"] == "teacher":
         class_values = [name for name in class_values if name in teacher_classes(user)]
     return render_template(
-        "rankings.html", subject_rows=subject_rows, overall_rows=overall_rows,
+        "rankings.html", overall_rows=overall_rows,
         classes=sorted(set(class_values + [class_group(value) for value in class_values])),
         subjects=teacher_subjects(user) if user["role"] == "teacher" else [row["subject"] for row in query("SELECT DISTINCT subject FROM exams ORDER BY subject")],
         exam_types=EXAM_TYPES, exam_type_filter=request.args.get("exam_type", ""),
-        ranking_scope=request.args.get("scope", "all"),
         class_filter=request.args.get("class_name", ""), subject_filter=request.args.get("subject", ""),
     )
 

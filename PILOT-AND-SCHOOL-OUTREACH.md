@@ -9,7 +9,8 @@ The current app is a Flask assessment platform designed primarily to run on a sc
 Do not present the current version as an already-finished cloud subscription product. In particular, confirm these points before promising them:
 
 - The optional hosted teacher portal is separate from the main exam app; it does not by itself make student exams or results available online from anywhere.
-- The app does not yet have a complete school subscription, license issuing, or automatic license renewal system.
+- The main app does not yet have whole-application licensing. If licensed to a school, access should expire for the entire app—not only student or teacher features—and must not be presented as permanent access.
+- For an offline school server, plan for a signed license file verified locally, with a defined expiry date, advance warnings, renewal/grace behavior, and a documented policy for data access and export after expiry.
 - Confirm what a teacher can access remotely and how fresh the results are before promising online score access.
 - Agree who supplies, secures, and maintains the school server, local network, backups, and internet connection.
 
