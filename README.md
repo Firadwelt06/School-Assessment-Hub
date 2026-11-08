@@ -4,6 +4,8 @@ A professional Flask-based local-network CBT platform for schools.
 
 Version 3.0 focuses on exam reliability: students' answers are saved to their attempt, restored after refresh, and finalized against a server-enforced timer.
 
+For a practical school pilot, pricing conversation, and outreach guide, see [School pilot and outreach guide](./PILOT-AND-SCHOOL-OUTREACH.md).
+
 ## System and software requirements
 
 ### School server
