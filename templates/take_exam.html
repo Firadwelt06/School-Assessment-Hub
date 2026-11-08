@@ -5,9 +5,12 @@
   <div class="instructions">{{ exam.instructions }} <span id="timer-warning" class="timer-warning" role="alert" aria-live="assertive"></span></div>
   <section class="attempt-progress panel" aria-label="Examination progress">
     <div class="progress-heading"><strong>Answer progress</strong><span id="answer-progress" role="status" aria-live="polite"></span></div>
-    <nav class="question-navigator" aria-label="Question navigator">
-      {% for q in questions %}<a href="#question-{{ q.id }}" data-question-nav="{{ q.id }}" aria-label="Question {{ loop.index }}, unanswered">{{ loop.index }}</a>{% endfor %}
-    </nav>
+    <details class="question-navigation">
+      <summary><span>Question navigation</span><span class="question-navigation-prompt">Click to show question numbers</span></summary>
+      <nav class="question-navigator" aria-label="Question navigator">
+        {% for q in questions %}<a href="#question-{{ q.id }}" data-question-nav="{{ q.id }}" aria-label="Question {{ loop.index }}, unanswered">{{ loop.index }}</a>{% endfor %}
+      </nav>
+    </details>
     <p id="save-status" class="save-status" role="status" aria-live="polite">Changes save automatically while connected.</p>
   </section>
   {% for q in questions %}<section class="cbt-question" id="question-{{ q.id }}" aria-labelledby="question-title-{{ q.id }}" tabindex="-1"><div class="question-number">Question {{ loop.index }} of {{ questions|length }}</div>{% if q.image_path %}<img class="question-image" src="{{ url_for('uploads', filename=q.image_path) }}" alt="Question illustration">{% endif %}<h2 id="question-title-{{ q.id }}">{{ q.stem }}</h2><div class="radio-options" role="radiogroup" aria-labelledby="question-title-{{ q.id }}">{% for letter in ['A','B','C','D'] %}<label><input type="radio" name="question_{{ q.id }}" value="{{ letter }}" {% if saved_answers.get(q.id) == letter %}checked{% endif %}><span><b>{{ letter }}</b>{{ q['option_' + letter.lower()] }}</span></label>{% endfor %}</div></section>{% endfor %}

@@ -1,0 +1,34 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "exam-arena-teacher-portal",
+  "main": "src/cloudflare.ts",
+  "compatibility_date": "2026-10-15",
+  "workers_dev": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "school-assessment-teacher-portal",
+      "database_id": "85956dd4-a90a-4cf0-a4ab-b121611002a1",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": true,
+      "persist": true
+    },
+    "traces": {
+      "enabled": false,
+      "head_sampling_rate": 1,
+      "persist": true
+    }
+  },
+  "r2_buckets": [
+    {
+      "binding": "SUBMISSION_IMAGES",
+      "bucket_name": "exam-arena-portal-images"
+    }
+  ]
+}
