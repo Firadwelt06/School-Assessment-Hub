@@ -406,6 +406,144 @@ class QuestionSubmissionAdminTests(unittest.TestCase):
         self.assertIn('name="teacher_classes"', page)
         self.assertIn("Sync now", page)
 
+    def test_online_submissions_page_shows_live_aws_teacher_directory(self):
+        remote_teacher = {
+            "username": "aws.only.teacher",
+            "full_name": "AWS Only Teacher",
+            "active": True,
+            "created_at": "2026-10-15T12:00:00Z",
+        }
+        with patch.dict(
+            os.environ,
+            {
+                "CLOUD_PORTAL_URL": "https://portal.example.com",
+                "CLOUD_PORTAL_SYNC_TOKEN": "private-test-token-value-with-at-least-32-characters",
+            },
+        ), patch.object(
+            assessment_app,
+            "get_portal_teacher_directory",
+            return_value=[remote_teacher],
+        ) as directory:
+            response = self.client.get("/admin/question-submissions")
+
+        page = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Live AWS portal teacher accounts", page)
+        self.assertIn("aws.only.teacher", page)
+        self.assertIn("AWS Only Teacher", page)
+        self.assertIn("Not synced locally", page)
+        directory.assert_called_once_with()
+
+    def test_admin_teacher_roster_shows_sync_state_without_credentials(self):
+        teachers = [
+            ("roster.pending", "Pending Teacher", "local-hash-pending", "Needs sync"),
+            ("roster.synced", "Synced Teacher", "local-hash-synced", "Synced"),
+            ("roster.conflict", "Conflict Teacher", "local-hash-conflict", "Conflict"),
+        ]
+        teacher_ids = []
+        try:
+            for username, full_name, password_hash, _ in teachers:
+                teacher_id = assessment_app.execute(
+                    """INSERT INTO users
+                    (username, full_name, password_hash, role, class_name, subjects, active, created_at)
+                    VALUES (?, ?, ?, 'teacher', '', 'Biology', 1, ?)""",
+                    (username, full_name, password_hash, "2026-10-15T12:00:00"),
+                )
+                teacher_ids.append(teacher_id)
+            synced = {
+                "username": teachers[1][0],
+                "full_name": teachers[1][1],
+                "password_hash": teachers[1][2],
+                "active": True,
+            }
+            assessment_app.execute(
+                "INSERT INTO teacher_sync_state(username, synced_fingerprint) VALUES (?, ?)",
+                (synced["username"], assessment_app.teacher_account_fingerprint(synced)),
+            )
+            assessment_app.execute(
+                "INSERT INTO teacher_sync_conflicts(username, detected_at) VALUES (?, ?)",
+                (teachers[2][0], "2026-10-15T12:00:00"),
+            )
+
+            response = self.client.get("/admin?role=teacher")
+            page = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            for username, full_name, _, status in teachers:
+                self.assertIn(username, page)
+                self.assertIn(full_name, page)
+                self.assertIn(status, page)
+            self.assertNotIn("local-hash-", page)
+            self.assertIn("Online portal sync", page)
+        finally:
+            for username, *_ in teachers:
+                assessment_app.execute("DELETE FROM teacher_sync_state WHERE username = ?", (username,))
+                assessment_app.execute("DELETE FROM teacher_sync_conflicts WHERE username = ?", (username,))
+            for teacher_id in teacher_ids:
+                assessment_app.execute(
+                    "DELETE FROM teacher_class_assignments WHERE teacher_id = ?",
+                    (teacher_id,),
+                )
+                assessment_app.execute("DELETE FROM users WHERE id = ?", (teacher_id,))
+
+    def test_exam_page_prompts_for_fullscreen_before_answering(self):
+        student_username = "fullscreen.student"
+        question_id = exam_id = student_id = None
+        try:
+            student_id = assessment_app.execute(
+                """INSERT INTO users
+                (username, full_name, password_hash, role, class_name, subjects, active, created_at)
+                VALUES (?, 'Fullscreen Student', 'student-hash', 'student', 'SS1', '', 1, ?)""",
+                (student_username, "2026-10-15T12:00:00"),
+            )
+            question_id = assessment_app.execute(
+                """INSERT INTO questions
+                (subject, topic, class_name, image_path, stem, option_a, option_b, option_c,
+                 option_d, correct_option, difficulty, explanation, standard, created_by, created_at)
+                VALUES ('Biology', 'Roots', 'SS1', '', 'Test question', 'A', 'B', 'C', 'D',
+                        'A', 'easy', '', '', ?, ?)""",
+                (self.admin_id, "2026-10-15T12:00:00"),
+            )
+            exam_id = assessment_app.execute(
+                """INSERT INTO exams
+                (title, subject, class_name, exam_type, instructions, duration_minutes,
+                 created_by, published, created_at)
+                VALUES ('Fullscreen test', 'Biology', 'SS1', 'quiz', '', 30, ?, 1, ?)""",
+                (self.admin_id, "2026-10-15T12:00:00"),
+            )
+            assessment_app.execute(
+                "INSERT INTO exam_questions(exam_id, question_id, position) VALUES (?, ?, 1)",
+                (exam_id, question_id),
+            )
+            with self.client.session_transaction() as session:
+                session["user_id"] = student_id
+
+            response = self.client.get(f"/exams/{exam_id}/take")
+            page = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("Enter fullscreen to begin", page)
+            self.assertIn("Enter fullscreen", page)
+            self.assertIn("Continue without fullscreen", page)
+            self.assertIn("Fullscreen was exited", page)
+            self.assertIn("The exam timer is already running", page)
+        finally:
+            if exam_id is not None:
+                attempt = assessment_app.query(
+                    "SELECT id FROM attempts WHERE exam_id = ? AND student_id = ?",
+                    (exam_id, student_id),
+                    one=True,
+                )
+                if attempt:
+                    assessment_app.execute("DELETE FROM responses WHERE attempt_id = ?", (attempt["id"],))
+                    assessment_app.execute("DELETE FROM attempts WHERE id = ?", (attempt["id"],))
+                assessment_app.execute("DELETE FROM exam_questions WHERE exam_id = ?", (exam_id,))
+                assessment_app.execute("DELETE FROM exams WHERE id = ?", (exam_id,))
+            if question_id is not None:
+                assessment_app.execute("DELETE FROM questions WHERE id = ?", (question_id,))
+            if student_id is not None:
+                assessment_app.execute("DELETE FROM users WHERE id = ?", (student_id,))
+
     def test_local_backup_can_be_downloaded_and_restored_with_safety_copy(self):
         original_backup_dir = assessment_app.LOCAL_BACKUP_DIR
         original_upload_dir = assessment_app.UPLOAD_DIR

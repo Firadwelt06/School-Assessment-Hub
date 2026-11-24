@@ -276,7 +276,7 @@ def set_portal_teacher_password_hash(username, full_name, password_hash, active=
     return {"ok": True}
 
 
-def _teacher_fingerprint(account):
+def teacher_account_fingerprint(account):
     material = "\0".join(
         (
             account["username"],
@@ -305,6 +305,22 @@ def _valid_teacher_account(account):
         )
         and isinstance(account.get("active"), bool)
     )
+
+
+def get_portal_teacher_directory():
+    response = portal_request("/api/sync/teachers")
+    accounts = response.get("teachers")
+    if not isinstance(accounts, list) or any(not _valid_teacher_account(item) for item in accounts):
+        raise PortalSyncError("The portal returned an invalid teacher account directory.")
+    return [
+        {
+            "username": account["username"],
+            "full_name": account["full_name"],
+            "active": account["active"],
+            "created_at": account.get("created_at", ""),
+        }
+        for account in accounts
+    ]
 
 
 def _database_rows(database_engine, database_factory, sql, params=()):
@@ -412,15 +428,15 @@ def sync_teacher_accounts(database_engine, database_factory):
                 conflicts.append(username)
                 continue
             imported += 1
-            _save_sync_baseline(database_engine, database_factory, username, _teacher_fingerprint(remote))
+            _save_sync_baseline(database_engine, database_factory, username, teacher_account_fingerprint(remote))
             continue
         if remote is None:
             portal_request("/api/sync/teachers/upsert", method="POST", payload=local)
             pushed += 1
-            _save_sync_baseline(database_engine, database_factory, username, _teacher_fingerprint(local))
+            _save_sync_baseline(database_engine, database_factory, username, teacher_account_fingerprint(local))
             continue
-        local_fingerprint = _teacher_fingerprint(local)
-        remote_fingerprint = _teacher_fingerprint(remote)
+        local_fingerprint = teacher_account_fingerprint(local)
+        remote_fingerprint = teacher_account_fingerprint(remote)
         if local_fingerprint == remote_fingerprint:
             _save_sync_baseline(database_engine, database_factory, username, local_fingerprint)
         elif baseline is None:
@@ -494,7 +510,7 @@ def resolve_teacher_account_conflict(database_engine, database_factory, username
                  __import__("datetime").datetime.now().isoformat(timespec="seconds")),
             )
         chosen = remote
-    _save_sync_baseline(database_engine, database_factory, username, _teacher_fingerprint(chosen))
+    _save_sync_baseline(database_engine, database_factory, username, teacher_account_fingerprint(chosen))
 
 
 def _apply_online_review_decisions(database_engine, database_factory, uploads_dir):

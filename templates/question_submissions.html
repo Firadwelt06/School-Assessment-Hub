@@ -16,6 +16,23 @@
   </form>
 </section>
 {% endif %}
+{% if portal_configured %}
+<section class="panel">
+  <div class="section-title"><h2>Live AWS portal teacher accounts</h2><span class="muted">{{ portal_teacher_accounts|length }} account(s)</span></div>
+  <p class="muted">Loaded directly from the AWS portal when this page opens. Sync an online-only account to add it to the local server. Passwords and password hashes are never displayed.</p>
+  {% if portal_teacher_directory_error %}
+  <p class="flash error" role="alert">Could not load the live AWS teacher list: {{ portal_teacher_directory_error }}</p>
+  {% else %}
+  <div class="table-wrap" role="region" aria-label="Live AWS portal teacher accounts" tabindex="0"><table><caption class="sr-only">Teacher accounts currently stored in the AWS teacher portal</caption><thead><tr><th scope="col">Username</th><th scope="col">Name</th><th scope="col">Created online</th><th scope="col">AWS access</th><th scope="col">Local account</th></tr></thead><tbody>
+    {% for teacher in portal_teacher_accounts %}
+    <tr><td>{{ teacher.username }}</td><td>{{ teacher.full_name }}</td><td>{{ teacher.created_at or '—' }}</td><td>{{ 'Active' if teacher.active else 'Disabled' }}</td><td>{{ teacher.local_status }}</td></tr>
+    {% else %}
+    <tr><td colspan="5" class="empty">No teacher accounts are currently in the AWS portal.</td></tr>
+    {% endfor %}
+  </tbody></table></div>
+  {% endif %}
+</section>
+{% endif %}
 <section class="panel">
   <div class="section-title"><h2>Teacher accounts</h2><span class="muted">Reset a portal password when a teacher cannot sign in</span></div>
   <details class="admin-details"><summary>Reset a teacher's password</summary><div class="admin-details-content">

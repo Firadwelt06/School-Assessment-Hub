@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 from cloud_sync import (
     PortalSyncError,
     _PortalRedirectHandler,
+    get_portal_teacher_directory,
     portal_request,
     sync_teacher_accounts,
     sync_question_submissions,
@@ -114,6 +115,37 @@ class CloudSyncTests(unittest.TestCase):
         self.assertEqual(payload["school_name"], "North School")
         self.assertEqual(payload["logo_content_type"], "image/png")
         self.assertEqual(payload["logo_base64"], "iVBORw0KGgpzbWFsbC1sb2dv")
+
+    def test_portal_teacher_directory_returns_safe_account_details(self):
+        account = {
+            "username": "amina.teacher",
+            "full_name": "Amina Teacher",
+            "password_hash": "a" * 32 + "$" + "b" * 64,
+            "active": True,
+            "created_at": "2026-10-15T12:00:00Z",
+        }
+        with patch("cloud_sync.portal_request", return_value={"teachers": [account]}) as request:
+            teachers = get_portal_teacher_directory()
+
+        self.assertEqual(request.call_args.args[0], "/api/sync/teachers")
+        self.assertEqual(
+            teachers,
+            [{
+                "username": "amina.teacher",
+                "full_name": "Amina Teacher",
+                "active": True,
+                "created_at": "2026-10-15T12:00:00Z",
+            }],
+        )
+        self.assertNotIn("password_hash", teachers[0])
+
+    def test_portal_teacher_directory_rejects_invalid_account_data(self):
+        with patch(
+            "cloud_sync.portal_request",
+            return_value={"teachers": [{"username": "bad", "full_name": "Bad Teacher"}]},
+        ):
+            with self.assertRaises(PortalSyncError):
+                get_portal_teacher_directory()
 
     def test_school_branding_sync_clears_a_removed_logo(self):
         with patch("cloud_sync.portal_request", return_value={"ok": True}) as portal_request_mock:

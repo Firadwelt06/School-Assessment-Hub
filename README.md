@@ -32,6 +32,7 @@ For a school with many simultaneous exam takers, use wired server networking, su
 - Teacher question bank and exam builder.
 - Branded CBT paper header using the administrator's school name, address, and logo.
 - Student browser-based CBT examination experience.
+- Fullscreen prompt before answering, with a warning if fullscreen is unavailable or exited; browser restrictions mean fullscreen cannot be enforced as a tamper-proof security boundary.
 - Attempt-scoped answer autosaving, refresh recovery, offline browser drafts, and clear connection/save status.
 - Question navigator with answered/unanswered progress and staff visibility into in-progress and elapsed attempts.
 - Automatic marking with subject and overall student rankings by class.
@@ -44,7 +45,7 @@ For a school with many simultaneous exam takers, use wired server networking, su
 - Subject, topic, and class metadata on every question.
 - MySQL storage for reliable multi-user school LAN deployment.
 - Optional daily Cloudflare R2 backups of the database and uploaded files, with 30-day retention.
-- A hosted teacher question portal with online or locally reviewed submissions, multi-question upload, and manually synchronized teacher accounts.
+- A hosted teacher question portal with online or locally reviewed submissions, multi-question upload, and manually synchronized teacher accounts; Admin shows local sync status and a live AWS teacher directory.
 - Accessibility improvements including keyboard skip navigation, visible focus, screen-reader status announcements, semantic exam answer groups, accessible chart summaries, and reduced-motion support.
 
 ## Run locally

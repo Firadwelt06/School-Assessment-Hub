@@ -23,6 +23,8 @@ from cloud_sync import (
     set_portal_teacher_password_hash as send_portal_teacher_password_hash,
     set_portal_teacher_active as send_portal_teacher_status,
     sync_teacher_accounts,
+    teacher_account_fingerprint,
+    get_portal_teacher_directory,
     sync_question_submissions,
     sync_school_branding,
 )
@@ -2408,7 +2410,7 @@ def admin():
     exam_subject_filter = request.args.get("exam_subject", "").strip()
     exam_class_filter = request.args.get("exam_class", "").strip()
     exam_status_filter = request.args.get("exam_status", "").strip()
-    user_sql = "SELECT id, username, full_name, role, class_name, subjects, active FROM users WHERE role != 'admin'"
+    user_sql = "SELECT id, username, full_name, role, class_name, subjects, active, created_at FROM users WHERE role != 'admin'"
     user_params = []
     if role_filter in ("teacher", "student"):
         user_sql += " AND role = ?"
@@ -2445,6 +2447,28 @@ def admin():
     if exam_class_filter:
         exams = [exam for exam in exams if class_matches(exam["class_name"], exam_class_filter)]
     users = query(user_sql, user_params)
+    teacher_sync_baselines = {
+        row["username"]: row["synced_fingerprint"]
+        for row in query("SELECT username, synced_fingerprint FROM teacher_sync_state")
+    }
+    teacher_sync_conflicts = {
+        row["username"]
+        for row in query("SELECT username FROM teacher_sync_conflicts")
+    }
+    teacher_portal_status = {}
+    for teacher in query(
+        "SELECT username, full_name, password_hash, active FROM users WHERE role = 'teacher'"
+    ):
+        username = teacher["username"]
+        if username in teacher_sync_conflicts:
+            status = "Conflict"
+        elif username not in teacher_sync_baselines:
+            status = "Needs sync"
+        elif teacher_account_fingerprint(dict(teacher)) == teacher_sync_baselines[username]:
+            status = "Synced"
+        else:
+            status = "Changes need sync"
+        teacher_portal_status[username] = status
     teacher_class_assignments = {}
     for assignment in query(
         "SELECT teacher_id, class_name FROM teacher_class_assignments ORDER BY class_name"
@@ -2463,6 +2487,7 @@ def admin():
     return render_template(
         "admin.html",
         users=users,
+        teacher_portal_status=teacher_portal_status,
         teacher_class_assignments=teacher_class_assignments,
         attempts=attempts,
         role_filter=role_filter, class_filter=class_filter,
@@ -2513,6 +2538,37 @@ def admin_question_submissions():
         sql += " WHERE status = ?"
         params.append(status_filter)
     sql += " ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, id DESC"
+    portal_configured = bool(
+        os.getenv("CLOUD_PORTAL_URL", "").strip()
+        and os.getenv("CLOUD_PORTAL_SYNC_TOKEN", "")
+    )
+    portal_teacher_accounts = []
+    portal_teacher_directory_error = ""
+    if portal_configured:
+        try:
+            local_teacher_usernames = {
+                row["username"]
+                for row in query("SELECT username FROM users WHERE role = 'teacher'")
+            }
+            conflicted_usernames = {
+                row["username"]
+                for row in query("SELECT username FROM teacher_sync_conflicts")
+            }
+            portal_teacher_accounts = [
+                {
+                    **account,
+                    "local_status": (
+                        "Conflict — review below"
+                        if account["username"] in conflicted_usernames
+                        else "Present locally"
+                        if account["username"] in local_teacher_usernames
+                        else "Not synced locally",
+                    ),
+                }
+                for account in get_portal_teacher_directory()
+            ]
+        except PortalSyncError as error:
+            portal_teacher_directory_error = str(error)
     return render_template(
         "question_submissions.html",
         submissions=query(sql, params),
@@ -2526,10 +2582,9 @@ def admin_question_submissions():
         teacher_sync_conflicts=query(
             "SELECT username, detected_at FROM teacher_sync_conflicts ORDER BY detected_at DESC"
         ),
-        portal_configured=bool(
-            os.getenv("CLOUD_PORTAL_URL", "").strip()
-            and os.getenv("CLOUD_PORTAL_SYNC_TOKEN", "")
-        ),
+        portal_configured=portal_configured,
+        portal_teacher_accounts=portal_teacher_accounts,
+        portal_teacher_directory_error=portal_teacher_directory_error,
     )
 
 

@@ -16,6 +16,13 @@
   {% for q in questions %}<section class="cbt-question" id="question-{{ q.id }}" aria-labelledby="question-title-{{ q.id }}" tabindex="-1"><div class="question-number">Question {{ loop.index }} of {{ questions|length }}</div>{% if q.image_path %}<img class="question-image" src="{{ url_for('uploads', filename=q.image_path) }}" alt="Question illustration">{% endif %}<h2 id="question-title-{{ q.id }}">{{ q.stem }}</h2><div class="radio-options" role="radiogroup" aria-labelledby="question-title-{{ q.id }}">{% for letter in ['A','B','C','D'] %}<label><input type="radio" name="question_{{ q.id }}" value="{{ letter }}" {% if saved_answers.get(q.id) == letter %}checked{% endif %}><span><b>{{ letter }}</b>{{ q['option_' + letter.lower()] }}</span></label>{% endfor %}</div></section>{% endfor %}
   <button class="button primary submit-exam" type="submit">Submit examination</button>
 </form>
+<dialog class="submit-dialog fullscreen-gate" id="fullscreen-gate" aria-labelledby="fullscreen-title" aria-describedby="fullscreen-description">
+  <h2 id="fullscreen-title">Enter fullscreen to begin</h2>
+  <p id="fullscreen-description">Use fullscreen for your examination. If your browser cannot enter fullscreen, you can continue with a warning. The exam timer is already running.</p>
+  <p id="fullscreen-error" class="flash warning" role="alert" hidden></p>
+  <div class="submit-dialog-actions"><button class="button primary" id="enter-fullscreen" type="button">Enter fullscreen</button><button class="button secondary" id="continue-without-fullscreen" type="button" hidden>Continue without fullscreen</button></div>
+</dialog>
+<div class="fullscreen-status" id="fullscreen-status" role="alert" aria-live="assertive" hidden><span id="fullscreen-message"></span><button class="button secondary" id="reenter-fullscreen" type="button">Re-enter fullscreen</button></div>
 <dialog class="submit-dialog" id="submit-confirmation" aria-labelledby="submit-confirmation-title" aria-describedby="submit-confirmation-message">
   <h2 id="submit-confirmation-title">Confirm submission</h2>
   <p id="submit-confirmation-message"></p>
@@ -26,6 +33,12 @@
   const timer = document.getElementById("countdown");
   const form = document.getElementById("exam-form");
   const submitDialog = document.getElementById("submit-confirmation");
+  const fullscreenGate = document.getElementById("fullscreen-gate");
+  const fullscreenError = document.getElementById("fullscreen-error");
+  const continueWithoutFullscreen = document.getElementById("continue-without-fullscreen");
+  const fullscreenStatus = document.getElementById("fullscreen-status");
+  const fullscreenMessage = document.getElementById("fullscreen-message");
+  const reenterFullscreen = document.getElementById("reenter-fullscreen");
   const submitMessage = document.getElementById("submit-confirmation-message");
   const returnToExam = document.getElementById("return-to-exam");
   const confirmSubmit = document.getElementById("confirm-submit");
@@ -43,6 +56,52 @@
   let dirty = false;
   let submitPending = false;
   let retryTimer = 0;
+  let examStarted = Boolean(document.fullscreenElement);
+
+  const showFullscreenFailure = (message) => {
+    if (fullscreenGate.open) {
+      fullscreenError.textContent = message;
+      fullscreenError.hidden = false;
+      continueWithoutFullscreen.hidden = false;
+    } else {
+      fullscreenStatus.hidden = false;
+      fullscreenMessage.textContent = message;
+    }
+  };
+  const enterFullscreen = async () => {
+    if (!document.documentElement.requestFullscreen) {
+      showFullscreenFailure("Fullscreen is not supported by this browser. You may continue, but the exam will not be fullscreen.");
+      return;
+    }
+    try {
+      await document.documentElement.requestFullscreen();
+      examStarted = true;
+      if (fullscreenGate.open) fullscreenGate.close();
+    } catch {
+      showFullscreenFailure("Fullscreen was blocked. Allow fullscreen in your browser and try again, or continue with a warning.");
+    }
+  };
+  document.getElementById("enter-fullscreen").addEventListener("click", enterFullscreen);
+  continueWithoutFullscreen.addEventListener("click", () => {
+    examStarted = true;
+    fullscreenGate.close();
+    fullscreenStatus.hidden = false;
+    fullscreenMessage.textContent = "You are not in fullscreen. Your exam is still running.";
+  });
+  reenterFullscreen.addEventListener("click", enterFullscreen);
+  fullscreenGate.addEventListener("cancel", (event) => event.preventDefault());
+  document.addEventListener("fullscreenchange", () => {
+    if (document.fullscreenElement) {
+      examStarted = true;
+      fullscreenStatus.hidden = true;
+      fullscreenError.hidden = true;
+      if (fullscreenGate.open) fullscreenGate.close();
+    } else if (examStarted) {
+      fullscreenStatus.hidden = false;
+      fullscreenMessage.textContent = "Fullscreen was exited. Your exam is still running; re-enter fullscreen to continue.";
+    }
+  });
+  if (!document.fullscreenElement) fullscreenGate.showModal();
 
   const loadLocalDraft = () => {
     const draft = JSON.parse(localStorage.getItem(storageKey) || "null");
