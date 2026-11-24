@@ -174,6 +174,24 @@ class QuestionSubmissionAdminTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         set_status.assert_called_once_with("teacher.name", False)
 
+    def test_local_admin_can_reset_the_separate_aws_portal_password(self):
+        with patch.object(assessment_app, "provision_portal_admin") as set_admin:
+            response = self.client.post(
+                "/admin/question-submissions/portal-admin",
+                data={
+                    "username": "Portal.Admin",
+                    "full_name": "Portal Administrator",
+                    "password": "NewUniquePortalPass123",
+                },
+            )
+
+        self.assertEqual(response.status_code, 302)
+        set_admin.assert_called_once_with(
+            "portal.admin",
+            "Portal Administrator",
+            "NewUniquePortalPass123",
+        )
+
     def test_admin_class_filter_matches_teacher_class_assignments(self):
         teacher_ids = []
         for username, class_name in (
@@ -485,6 +503,87 @@ class QuestionSubmissionAdminTests(unittest.TestCase):
                     (teacher_id,),
                 )
                 assessment_app.execute("DELETE FROM users WHERE id = ?", (teacher_id,))
+
+    def test_admin_can_filter_attempts_and_batch_grant_rewrites(self):
+        students = []
+        exam_id = None
+        attempt_ids = []
+        try:
+            for username, full_name, class_name in (
+                ("rewrite.batch.ss1", "Rewrite Batch Student SS1", "SS1"),
+                ("rewrite.batch.ss2", "Rewrite Batch Student SS2", "SS2"),
+            ):
+                student_id = assessment_app.execute(
+                    """INSERT INTO users
+                    (username, full_name, password_hash, role, class_name, subjects, active, created_at)
+                    VALUES (?, ?, 'student-hash', 'student', ?, '', 1, ?)""",
+                    (username, full_name, class_name, "2026-10-15T12:00:00"),
+                )
+                students.append(student_id)
+            exam_id = assessment_app.execute(
+                """INSERT INTO exams
+                (title, subject, class_name, exam_type, instructions, duration_minutes,
+                 created_by, published, created_at)
+                VALUES ('Batch rewrite exam', 'Biology', 'SS1', 'quiz', '', 30, ?, 1, ?)""",
+                (self.admin_id, "2026-10-15T12:00:00"),
+            )
+            for student_id, submitted_at in zip(
+                students,
+                ("2026-10-15T12:30:00", ""),
+            ):
+                attempt_ids.append(assessment_app.execute(
+                    """INSERT INTO attempts
+                    (exam_id, student_id, score, total, started_at, submitted_at)
+                    VALUES (?, ?, 1, 2, '2026-10-15T12:00:00', ?)""",
+                    (exam_id, student_id, submitted_at),
+                ))
+
+            filtered = self.client.get(
+                f"/admin?attempt_class=SS1&attempt_exam={exam_id}&attempt_status=submitted&attempt_permission=needed"
+            )
+            filtered_page = filtered.get_data(as_text=True)
+            attempt_table = filtered_page.split('id="batch-rewrite-form"', 1)[1].split("</form>", 1)[0]
+            self.assertEqual(filtered.status_code, 200)
+            self.assertIn("Rewrite Batch Student SS1", attempt_table)
+            self.assertNotIn("Rewrite Batch Student SS2", attempt_table)
+
+            response = self.client.post(
+                "/admin/rewrite/batch",
+                data={"attempt_ids": [str(attempt_id) for attempt_id in attempt_ids]},
+            )
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(
+                assessment_app.query(
+                    "SELECT COUNT(*) AS count FROM rewrite_permissions WHERE attempt_id IN (?, ?)",
+                    tuple(attempt_ids),
+                    one=True,
+                )["count"],
+                2,
+            )
+        finally:
+            for attempt_id in attempt_ids:
+                assessment_app.execute("DELETE FROM rewrite_permissions WHERE attempt_id = ?", (attempt_id,))
+                assessment_app.execute("DELETE FROM responses WHERE attempt_id = ?", (attempt_id,))
+                assessment_app.execute("DELETE FROM attempts WHERE id = ?", (attempt_id,))
+            if exam_id is not None:
+                assessment_app.execute("DELETE FROM exams WHERE id = ?", (exam_id,))
+            for student_id in students:
+                assessment_app.execute("DELETE FROM users WHERE id = ?", (student_id,))
+
+    def test_batch_rewrite_rejects_nonexistent_attempt_without_partial_grants(self):
+        response = self.client.post(
+            "/admin/rewrite/batch",
+            data={"attempt_ids": ["999999999"]},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIsNone(
+            assessment_app.query(
+                "SELECT id FROM rewrite_permissions WHERE attempt_id = ?",
+                (999999999,),
+                one=True,
+            )
+        )
 
     def test_exam_page_prompts_for_fullscreen_before_answering(self):
         student_username = "fullscreen.student"

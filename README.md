@@ -382,7 +382,7 @@ Display: \[\frac{-b \pm \sqrt{b^2 - 4ac}}{2a}\]
 
 The CBT pages render these formulas using MathJax when the connected device has internet access. The plain LaTeX remains readable if the LAN has no internet access.
 
-Only an administrator can grant a completed exam a rewrite permission. The permission is visible in **Administration** beside the student's completed attempt.
+Only an administrator can grant an exam rewrite permission. In **Administration → Exams and student results**, filter attempts by class, exam, status, or rewrite-access state, then select eligible attempts and grant rewrite access in a batch. Exam and attempt tables can be collapsed when not needed.
 
 For production, replace demo passwords, use a strong secret key, add HTTPS/reverse-proxy protection, and move persistence to PostgreSQL.
 
@@ -430,6 +430,10 @@ Check that `CLOUD_PORTAL_URL` is the exact HTTPS `TeacherPortalUrl` from the AWS
 ### Online teacher login works, but local sign-in or password does not
 
 Run **Administration → Online question submissions → Sync now** while the local server can reach the portal. This imports new online teacher accounts and copies a one-sided password change. A password change made locally is pushed on the next sync. If the local account and online account were both changed since their last successful sync, review the conflict on that page and choose which copy should be kept. A new online teacher also needs local subject and class assignments before seeing result reports.
+
+### I forgot the AWS portal administrator password
+
+The AWS portal admin login is separate from the local school-app admin login. While signed in locally as an administrator, open **Administration → Online question submissions → Online portal administrator**. Enter the existing online admin username and full name, then set a new unique password of at least 12 characters. This resets the AWS portal password without changing the local password. If this is the first portal admin, enter the new account details instead.
 
 ### Can teachers see results when the school server is offline?
 

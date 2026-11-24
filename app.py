@@ -2410,6 +2410,16 @@ def admin():
     exam_subject_filter = request.args.get("exam_subject", "").strip()
     exam_class_filter = request.args.get("exam_class", "").strip()
     exam_status_filter = request.args.get("exam_status", "").strip()
+    attempt_class_filter = request.args.get("attempt_class", "").strip()
+    attempt_exam_filter = request.args.get("attempt_exam", "").strip()
+    attempt_status_filter = request.args.get("attempt_status", "").strip()
+    attempt_permission_filter = request.args.get("attempt_permission", "").strip()
+    if not attempt_exam_filter.isdigit():
+        attempt_exam_filter = ""
+    if attempt_status_filter not in {"submitted", "in_progress", "elapsed"}:
+        attempt_status_filter = ""
+    if attempt_permission_filter not in {"needed", "granted"}:
+        attempt_permission_filter = ""
     user_sql = "SELECT id, username, full_name, role, class_name, subjects, active, created_at FROM users WHERE role != 'admin'"
     user_params = []
     if role_filter in ("teacher", "student"):
@@ -2474,14 +2484,39 @@ def admin():
         "SELECT teacher_id, class_name FROM teacher_class_assignments ORDER BY class_name"
     ):
         teacher_class_assignments.setdefault(assignment["teacher_id"], []).append(assignment["class_name"])
-    attempts = [
+    all_attempts = [
         {**dict(attempt), "status": attempt_status(attempt)}
         for attempt in query(
-        """SELECT a.id, a.score, a.total, a.started_at, a.submitted_at, e.duration_minutes,
-        u.full_name, u.class_name, e.title,
+        """SELECT a.id, a.score, a.total, a.started_at, a.submitted_at, a.exam_id,
+        e.duration_minutes, u.full_name, u.class_name, e.title,
         EXISTS(SELECT 1 FROM rewrite_permissions rp WHERE rp.attempt_id=a.id) AS rewrite_granted
         FROM attempts a JOIN users u ON u.id=a.student_id JOIN exams e ON e.id=a.exam_id
         ORDER BY CASE WHEN a.submitted_at = '' THEN 0 ELSE 1 END, a.submitted_at DESC"""
+        )
+    ]
+    attempts = [
+        attempt for attempt in all_attempts
+        if (
+            not attempt_class_filter
+            or class_matches(attempt["class_name"], attempt_class_filter)
+        )
+        and (not attempt_exam_filter or str(attempt["exam_id"]) == attempt_exam_filter)
+        and (
+            not attempt_status_filter
+            or (
+                attempt_status_filter == "submitted" and attempt["status"] == "Submitted"
+            )
+            or (
+                attempt_status_filter == "in_progress" and attempt["status"] == "In progress"
+            )
+            or (
+                attempt_status_filter == "elapsed"
+                and attempt["status"] == "Time elapsed · awaiting reconnection"
+            )
+        )
+        and (
+            not attempt_permission_filter
+            or attempt["rewrite_granted"] == (attempt_permission_filter == "granted")
         )
     ]
     return render_template(
@@ -2490,6 +2525,15 @@ def admin():
         teacher_portal_status=teacher_portal_status,
         teacher_class_assignments=teacher_class_assignments,
         attempts=attempts,
+        attempt_class_filter=attempt_class_filter,
+        attempt_exam_filter=attempt_exam_filter,
+        attempt_status_filter=attempt_status_filter,
+        attempt_permission_filter=attempt_permission_filter,
+        attempt_classes=class_group_options(),
+        attempt_exams=query(
+            """SELECT DISTINCT e.id, e.title FROM exams e JOIN attempts a ON a.exam_id = e.id
+            ORDER BY e.title"""
+        ),
         role_filter=role_filter, class_filter=class_filter,
         exam_subject_filter=exam_subject_filter, exam_class_filter=exam_class_filter,
         exam_status_filter=exam_status_filter,
@@ -2524,6 +2568,73 @@ def toggle_access_code(code_id):
         execute("UPDATE subject_access_codes SET active = ? WHERE id = ?", (int(not record["active"]), code_id))
         flash(f"{record['role'].capitalize()} access code {'enabled' if not record['active'] else 'disabled'}.", "success")
     return redirect(url_for("admin"))
+
+
+@app.post("/admin/rewrite/batch")
+@login_required("admin")
+def grant_rewrite_batch():
+    raw_ids = request.form.getlist("attempt_ids")
+    try:
+        attempt_ids = list(dict.fromkeys(int(value) for value in raw_ids))
+    except ValueError:
+        flash("The selected attempts were invalid. No rewrite permissions were changed.", "error")
+        return redirect(url_for("admin", _anchor="exam-tools"))
+    if not attempt_ids or len(attempt_ids) > 500 or any(attempt_id <= 0 for attempt_id in attempt_ids):
+        flash("Select between 1 and 500 valid attempts to grant rewrites.", "error")
+        return redirect(url_for("admin", _anchor="exam-tools"))
+
+    placeholders = ", ".join("?" for _ in attempt_ids)
+    valid_ids = {
+        row["id"]
+        for row in query(
+            f"""SELECT a.id FROM attempts a JOIN users u ON u.id = a.student_id
+            WHERE u.role = 'student' AND a.id IN ({placeholders})""",
+            tuple(attempt_ids),
+        )
+    }
+    if valid_ids != set(attempt_ids):
+        flash("One or more selected student attempts no longer exist. No rewrite permissions were changed.", "error")
+        return redirect(url_for("admin", _anchor="exam-tools"))
+
+    connection = db()
+    granted_at = datetime.now().isoformat(timespec="seconds")
+    try:
+        if DB_ENGINE == "mysql":
+            connection.begin()
+        else:
+            connection.execute("BEGIN IMMEDIATE")
+        for attempt_id in attempt_ids:
+            if DB_ENGINE == "mysql":
+                execute_on_connection(
+                    connection,
+                    """INSERT INTO rewrite_permissions(attempt_id, granted_by, granted_at)
+                    VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE
+                    granted_by = VALUES(granted_by), granted_at = VALUES(granted_at)""",
+                    (attempt_id, current_user()["id"], granted_at),
+                )
+            else:
+                execute_on_connection(
+                    connection,
+                    """INSERT OR REPLACE INTO rewrite_permissions
+                    (attempt_id, granted_by, granted_at) VALUES (?, ?, ?)""",
+                    (attempt_id, current_user()["id"], granted_at),
+                )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+    flash(f"Granted rewrite access for {len(attempt_ids)} student attempt(s).", "success")
+    return redirect(url_for(
+        "admin",
+        attempt_class=request.form.get("attempt_class", ""),
+        attempt_exam=request.form.get("attempt_exam", ""),
+        attempt_status=request.form.get("attempt_status", ""),
+        attempt_permission=request.form.get("attempt_permission", ""),
+        _anchor="exam-tools",
+    ))
 
 
 @app.get("/admin/question-submissions")
