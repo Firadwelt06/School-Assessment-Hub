@@ -323,6 +323,32 @@ def get_portal_teacher_directory():
     ]
 
 
+def get_portal_admin_directory():
+    response = portal_request("/api/sync/admins")
+    accounts = response.get("admins")
+    if (
+        not isinstance(accounts, list)
+        or any(
+            not isinstance(account, dict)
+            or not isinstance(account.get("username"), str)
+            or re.fullmatch(r"[a-z0-9._-]{3,64}", account["username"]) is None
+            or not isinstance(account.get("full_name"), str)
+            or not 2 <= len(account["full_name"]) <= 100
+            or not isinstance(account.get("active"), bool)
+            for account in accounts
+        )
+    ):
+        raise PortalSyncError("The portal returned an invalid administrator account directory.")
+    return [
+        {
+            "username": account["username"],
+            "full_name": account["full_name"],
+            "active": account["active"],
+        }
+        for account in accounts
+    ]
+
+
 def _database_rows(database_engine, database_factory, sql, params=()):
     connection = database_factory()
     try:

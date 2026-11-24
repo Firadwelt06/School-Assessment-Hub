@@ -45,7 +45,7 @@ For a school with many simultaneous exam takers, use wired server networking, su
 - Subject, topic, and class metadata on every question.
 - MySQL storage for reliable multi-user school LAN deployment.
 - Optional daily Cloudflare R2 backups of the database and uploaded files, with 30-day retention.
-- A hosted teacher question portal with online or locally reviewed submissions, multi-question upload, and manually synchronized teacher accounts; Admin shows local sync status and a live AWS teacher directory.
+- A hosted teacher question portal with online or locally reviewed submissions, multi-question upload, and manually synchronized teacher accounts; Admin shows local sync status and live AWS teacher and administrator directories.
 - Accessibility improvements including keyboard skip navigation, visible focus, screen-reader status announcements, semantic exam answer groups, accessible chart summaries, and reduced-motion support.
 
 ## Run locally

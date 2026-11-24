@@ -1,6 +1,7 @@
 import type {
   ImageStore,
   NewSubmission,
+  PortalAdminAccount,
   PortalAdmin,
   PortalBranding,
   PortalStore,
@@ -137,6 +138,13 @@ export class D1PortalStore implements PortalStore {
        password_hash = excluded.password_hash, active = 1`,
     ).bind(input.username, input.full_name, input.password_hash).run();
     await this.db.prepare("DELETE FROM portal_admin_sessions WHERE username = ?").bind(input.username).run();
+  }
+
+  async listAdminAccounts() {
+    const result = await this.db.prepare(
+      "SELECT username, full_name, active FROM portal_admins ORDER BY username",
+    ).all<PortalAdminAccount>();
+    return result.results.map((item) => ({ ...item, active: Boolean(item.active) }));
   }
 
   async createAdminSession(input: { token_hash: string; username: string; expires_at: number }) {

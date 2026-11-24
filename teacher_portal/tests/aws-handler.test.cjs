@@ -152,6 +152,39 @@ test("teacher account sync APIs reject requests without the sync token", async (
   assert.deepEqual(JSON.parse(response.body), { error: "Unauthorized." });
 });
 
+test("administrator account sync API rejects requests without the sync token", async () => {
+  const response = await handler(event("/api/sync/admins"));
+  assert.equal(response.statusCode, 401);
+  assert.deepEqual(JSON.parse(response.body), { error: "Unauthorized." });
+});
+
+test("administrator account sync API returns only directory details", async () => {
+  const token = "test-sync-token-value-that-is-long-enough-to-pass";
+  const response = await handleAwsEvent(event("/api/sync/admins", "GET", {
+    headers: {
+      host: "portal.execute-api.us-east-1.amazonaws.com",
+      authorization: `Bearer ${token}`,
+    },
+  }), {
+    SYNC_TOKEN: token,
+    store: {
+      listAdminAccounts: async () => [{
+        username: "school.admin",
+        full_name: "School Administrator",
+        active: true,
+      }],
+    },
+  });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(JSON.parse(response.body), {
+    admins: [{
+      username: "school.admin",
+      full_name: "School Administrator",
+      active: true,
+    }],
+  });
+});
+
 test("AWS function role can scan the teacher directory for account sync", () => {
   const template = fs.readFileSync(path.join(__dirname, "..", "template.yaml"), "utf8");
   assert.match(template, /- dynamodb:Scan/);

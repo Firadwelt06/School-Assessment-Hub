@@ -903,6 +903,11 @@ async function syncTeacherAccounts(request: Request, env: Env) {
   return json({ teachers: await env.store.listTeacherAccounts() });
 }
 
+async function syncAdminAccounts(request: Request, env: Env) {
+  if (!await requireSyncToken(request, env)) return json({ error: "Unauthorized." }, 401);
+  return json({ admins: await env.store.listAdminAccounts() });
+}
+
 async function syncBranding(request: Request, env: Env) {
   if (!await requireSyncToken(request, env)) return json({ error: "Unauthorized." }, 401);
   let body: Record<string, unknown>;
@@ -1277,6 +1282,7 @@ async function router(request: Request, env: Env): Promise<Response> {
     if (method === "GET" && path === "/api/sync/pending") return syncPending(request, env);
     if (method === "GET" && path === "/api/sync/reviewed") return syncReviewed(request, env);
     if (method === "GET" && path === "/api/sync/teachers") return syncTeacherAccounts(request, env);
+    if (method === "GET" && path === "/api/sync/admins") return syncAdminAccounts(request, env);
     if (method === "POST" && path === "/api/sync/branding") return syncBranding(request, env);
     if (method === "POST" && path === "/api/sync/teachers/upsert") return syncTeacherAccount(request, env);
     if (method === "POST" && path === "/api/sync/admin/set-password") return setPortalAdmin(request, env);

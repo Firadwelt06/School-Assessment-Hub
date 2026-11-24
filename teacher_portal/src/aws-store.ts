@@ -23,6 +23,7 @@ import type {
   ImageStore,
   NewSubmission,
   PortalBranding,
+  PortalAdminAccount,
   PortalStore,
   RateLimitRecord,
   Submission,
@@ -318,6 +319,30 @@ export class DynamoPortalStore implements PortalStore {
         active: true,
       },
     }));
+  }
+
+  async listAdminAccounts(): Promise<PortalAdminAccount[]> {
+    let lastKey: Record<string, unknown> | undefined;
+    const accounts: PortalAdminAccount[] = [];
+    do {
+      const page = await dynamo.send(new ScanCommand({
+        TableName: config.teachersTable,
+        FilterExpression: "account_type = :account_type",
+        ProjectionExpression: "login_username, full_name, active",
+        ExpressionAttributeValues: { ":account_type": "admin" },
+        ExclusiveStartKey: lastKey,
+      }));
+      for (const item of page.Items ?? []) {
+        if (typeof item.login_username !== "string" || typeof item.full_name !== "string") continue;
+        accounts.push({
+          username: item.login_username,
+          full_name: item.full_name,
+          active: Boolean(item.active),
+        });
+      }
+      lastKey = page.LastEvaluatedKey;
+    } while (lastKey);
+    return accounts.sort((first, second) => first.username.localeCompare(second.username));
   }
 
   async createAdminSession(input: { token_hash: string; username: string; expires_at: number }) {

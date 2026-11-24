@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 from cloud_sync import (
     PortalSyncError,
     _PortalRedirectHandler,
+    get_portal_admin_directory,
     get_portal_teacher_directory,
     portal_request,
     sync_teacher_accounts,
@@ -146,6 +147,35 @@ class CloudSyncTests(unittest.TestCase):
         ):
             with self.assertRaises(PortalSyncError):
                 get_portal_teacher_directory()
+
+    def test_portal_admin_directory_returns_only_safe_account_details(self):
+        account = {
+            "username": "portal.admin",
+            "full_name": "Portal Administrator",
+            "active": True,
+            "password_hash": "sensitive-hash",
+        }
+        with patch("cloud_sync.portal_request", return_value={"admins": [account]}) as request:
+            admins = get_portal_admin_directory()
+
+        self.assertEqual(request.call_args.args[0], "/api/sync/admins")
+        self.assertEqual(
+            admins,
+            [{
+                "username": "portal.admin",
+                "full_name": "Portal Administrator",
+                "active": True,
+            }],
+        )
+        self.assertNotIn("password_hash", admins[0])
+
+    def test_portal_admin_directory_rejects_invalid_account_data(self):
+        with patch(
+            "cloud_sync.portal_request",
+            return_value={"admins": [{"username": "bad", "full_name": "X", "active": True}]},
+        ):
+            with self.assertRaises(PortalSyncError):
+                get_portal_admin_directory()
 
     def test_school_branding_sync_clears_a_removed_logo(self):
         with patch("cloud_sync.portal_request", return_value={"ok": True}) as portal_request_mock:

@@ -25,6 +25,7 @@ from cloud_sync import (
     sync_teacher_accounts,
     teacher_account_fingerprint,
     get_portal_teacher_directory,
+    get_portal_admin_directory,
     sync_question_submissions,
     sync_school_branding,
 )
@@ -2654,6 +2655,7 @@ def admin_question_submissions():
         and os.getenv("CLOUD_PORTAL_SYNC_TOKEN", "")
     )
     portal_teacher_accounts = []
+    portal_admin_accounts = []
     portal_teacher_directory_error = ""
     if portal_configured:
         try:
@@ -2678,6 +2680,7 @@ def admin_question_submissions():
                 }
                 for account in get_portal_teacher_directory()
             ]
+            portal_admin_accounts = get_portal_admin_directory()
         except PortalSyncError as error:
             portal_teacher_directory_error = str(error)
     return render_template(
@@ -2695,6 +2698,7 @@ def admin_question_submissions():
         ),
         portal_configured=portal_configured,
         portal_teacher_accounts=portal_teacher_accounts,
+        portal_admin_accounts=portal_admin_accounts,
         portal_teacher_directory_error=portal_teacher_directory_error,
     )
 

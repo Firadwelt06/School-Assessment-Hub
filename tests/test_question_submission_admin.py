@@ -441,7 +441,15 @@ class QuestionSubmissionAdminTests(unittest.TestCase):
             assessment_app,
             "get_portal_teacher_directory",
             return_value=[remote_teacher],
-        ) as directory:
+        ) as directory, patch.object(
+            assessment_app,
+            "get_portal_admin_directory",
+            return_value=[{
+                "username": "portal.admin",
+                "full_name": "Portal Administrator",
+                "active": True,
+            }],
+        ):
             response = self.client.get("/admin/question-submissions")
 
         page = response.get_data(as_text=True)
@@ -450,6 +458,9 @@ class QuestionSubmissionAdminTests(unittest.TestCase):
         self.assertIn("aws.only.teacher", page)
         self.assertIn("AWS Only Teacher", page)
         self.assertIn("Not synced locally", page)
+        self.assertIn("Administrators", page)
+        self.assertIn("portal.admin", page)
+        self.assertIn("Portal Administrator", page)
         directory.assert_called_once_with()
 
     def test_admin_teacher_roster_shows_sync_state_without_credentials(self):

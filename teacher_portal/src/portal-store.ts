@@ -9,6 +9,10 @@ export interface PortalAdmin {
   full_name: string;
 }
 
+export interface PortalAdminAccount extends PortalAdmin {
+  active: boolean;
+}
+
 export interface PortalBranding {
   school_name: string;
   logo_present: boolean;
@@ -96,6 +100,7 @@ export interface PortalStore {
   findAdminForLogin(username: string): Promise<(PortalAdmin & { password_hash: string }) | null>;
   findAdminForSession(tokenHash: string, now: number): Promise<PortalAdmin | null>;
   saveAdmin(input: PortalAdmin & { password_hash: string }): Promise<void>;
+  listAdminAccounts(): Promise<PortalAdminAccount[]>;
   createAdminSession(input: { token_hash: string; username: string; expires_at: number }): Promise<void>;
   deleteAdminSession(tokenHash: string): Promise<void>;
   createSubmission(submission: NewSubmission, imageUploadKey?: string): Promise<void>;
