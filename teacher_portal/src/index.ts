@@ -514,7 +514,15 @@ function dashboardPage(
   );
 }
 
-function teacherResultsPage(teacher: Teacher, results: ExamResult[], branding = DEFAULT_BRANDING, portalOrigin = "https://portal.invalid") {
+function teacherResultsPage(
+  teacher: Teacher,
+  availableResults: ExamResult[],
+  results: ExamResult[],
+  subjectFilter: string,
+  examTypeFilter: string,
+  branding = DEFAULT_BRANDING,
+  portalOrigin = "https://portal.invalid",
+) {
   const rows = results.map((result) => {
     const percentage = result.total ? (result.score / result.total * 100).toFixed(1) : "0.0";
     const score = Number.isInteger(result.score) ? String(result.score) : result.score.toFixed(1);
@@ -523,11 +531,22 @@ function teacherResultsPage(teacher: Teacher, results: ExamResult[], branding = 
       <td>${escapeHtml(result.subject)}</td><td>${escapeHtml(result.exam_type)}</td>
       <td>${escapeHtml(score)} / ${escapeHtml(result.total)}</td><td>${percentage}%</td></tr>`;
   }).join("");
+  const subjects = [...new Set(availableResults.map((result) => result.subject))].sort();
+  const examTypes = [...new Set(availableResults.map((result) => result.exam_type))].sort();
   const content = `<h1>Exam results</h1>
     <p class="muted">Synced results for your assigned subjects and classes.</p>
-    ${results.length
+    <form method="get" action="/results" class="panel grid">
+      <label>Subject<select name="subject"><option value="">All assigned subjects</option>${subjects.map((subject) =>
+        `<option value="${escapeHtml(subject)}"${subject === subjectFilter ? " selected" : ""}>${escapeHtml(subject)}</option>`,
+      ).join("")}</select></label>
+      <label>Exam type<select name="exam_type"><option value="">All exam types</option>${examTypes.map((examType) =>
+        `<option value="${escapeHtml(examType)}"${examType === examTypeFilter ? " selected" : ""}>${escapeHtml(examType)}</option>`,
+      ).join("")}</select></label>
+      <div class="full actions"><button>Apply filters</button><a class="button secondary" href="/results">Reset</a></div>
+    </form>
+    ${availableResults.length && results.length
       ? `<section class="panel"><table><thead><tr><th>Submitted</th><th>Class</th><th>Student</th><th>Exam</th><th>Subject</th><th>Type</th><th>Score</th><th>Percent</th></tr></thead><tbody>${rows}</tbody></table></section>`
-      : `<section class="panel"><p>No synced results are available for your assigned subjects and classes.</p></section>`}
+      : `<section class="panel"><p>${availableResults.length ? "No results match these filters." : "No synced results are available for your assigned subjects and classes."}</p></section>`}
     <p><a href="/">Back to teacher portal</a></p>`;
   return page("Exam results", content, teacher, "", null, "", undefined, branding, portalOrigin);
 }
@@ -1457,8 +1476,31 @@ async function router(request: Request, env: Env): Promise<Response> {
   const teacher = await getTeacher(request, env);
   if (method === "GET" && path === "/results") {
     if (!teacher) return redirect("/login");
-    const results = await env.store.listTeacherResults(teacher.subjects, teacher.classes);
-    return teacherResultsPage(teacher, results, await env.store.getBranding(), requestPortalOrigin(request));
+    const storedResults = await env.store.listTeacherResults(teacher.subjects, teacher.classes);
+    const availableResults = storedResults.filter((result) =>
+      teacher.subjects.includes(result.subject) && teacher.classes.includes(result.class_name),
+    );
+    const requestedSubject = url.searchParams.get("subject") ?? "";
+    const requestedExamType = url.searchParams.get("exam_type") ?? "";
+    const subjectFilter = availableResults.some((result) => result.subject === requestedSubject)
+      ? requestedSubject
+      : "";
+    const examTypeFilter = availableResults.some((result) => result.exam_type === requestedExamType)
+      ? requestedExamType
+      : "";
+    const filteredResults = availableResults.filter((result) =>
+      (!subjectFilter || result.subject === subjectFilter) &&
+      (!examTypeFilter || result.exam_type === examTypeFilter),
+    );
+    return teacherResultsPage(
+      teacher,
+      availableResults,
+      filteredResults,
+      subjectFilter,
+      examTypeFilter,
+      await env.store.getBranding(),
+      requestPortalOrigin(request),
+    );
   }
   if (path === "/") {
     const branding = await env.store.getBranding();

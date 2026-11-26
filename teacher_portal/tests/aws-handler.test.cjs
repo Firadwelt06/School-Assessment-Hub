@@ -203,7 +203,7 @@ test("result sync upserts stable attempt ids and replaces rewritten snapshots", 
   assert.equal(stored.size, 0);
 });
 
-test("teacher results page passes only the signed-in teacher scopes to storage", async () => {
+test("teacher results filters stay inside assigned subject and class scopes", async () => {
   const { webcrypto } = require("node:crypto");
   const token = "teacher-session-token";
   const digest = await webcrypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
@@ -220,8 +220,15 @@ test("teacher results page passes only the signed-in teacher scopes to storage",
     total: 10,
     submitted_at: "2026-10-20T12:00:00",
   };
+  const results = [
+    result,
+    { ...result, id: `${result.id}:2`, student_name: "Student Two", subject: "Mathematics", exam_type: "final" },
+    { ...result, id: `${result.id}:3`, student_name: "Outside Subject", subject: "History" },
+    { ...result, id: `${result.id}:4`, student_name: "Outside Class", class_name: "Class 2" },
+  ];
   let requestedScopes;
   const response = await handleAwsEvent(event("/results", "GET", {
+    rawQueryString: "subject=Mathematics&exam_type=final",
     headers: {
       host: "portal.execute-api.us-east-1.amazonaws.com",
       cookie: `portal_session=${token}`,
@@ -230,19 +237,21 @@ test("teacher results page passes only the signed-in teacher scopes to storage",
     store: {
       findTeacherForSession: async (hash) => hash === sessionHash ? {
         id: "1", username: "ada.teacher", full_name: "Ada Teacher",
-        subjects: ["Science"], classes: ["Class 1"],
+        subjects: ["Science", "Mathematics"], classes: ["Class 1"],
       } : null,
       getBranding: async () => ({ school_name: "North School", logo_present: false }),
       listTeacherResults: async (subjects, classes) => {
         requestedScopes = { subjects, classes };
-        return [result];
+        return results;
       },
     },
   });
   assert.equal(response.statusCode, 200);
-  assert.deepEqual(requestedScopes, { subjects: ["Science"], classes: ["Class 1"] });
-  assert.match(response.body, /Student One/);
-  assert.match(response.body, /80\.0%/);
+  assert.deepEqual(requestedScopes, { subjects: ["Science", "Mathematics"], classes: ["Class 1"] });
+  assert.match(response.body, /Student Two/);
+  assert.match(response.body, /Mathematics/);
+  assert.match(response.body, /final/);
+  assert.doesNotMatch(response.body, /Student One|Outside Subject|Outside Class|History/);
 });
 
 test("administrator account sync API rejects requests without the sync token", async () => {
