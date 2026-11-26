@@ -9,6 +9,7 @@ process.env.SUBMISSIONS_TABLE = "submissions";
 process.env.RATE_LIMITS_TABLE = "rate-limits";
 process.env.IMAGE_UPLOADS_TABLE = "image-uploads";
 process.env.SETTINGS_TABLE = "settings";
+process.env.EXAM_RESULTS_TABLE = "exam-results";
 process.env.SUBMISSION_IMAGES_BUCKET = "private-images";
 delete process.env.SCHOOL_SIGNUP_CODE;
 delete process.env.SYNC_TOKEN;
@@ -150,6 +151,98 @@ test("teacher account sync APIs reject requests without the sync token", async (
   const response = await handler(event("/api/sync/teachers"));
   assert.equal(response.statusCode, 401);
   assert.deepEqual(JSON.parse(response.body), { error: "Unauthorized." });
+});
+
+test("result sync upserts stable attempt ids and replaces rewritten snapshots", async () => {
+  const token = "test-sync-token-value-that-is-long-enough-to-pass";
+  const sourceId = "123e4567-e89b-12d3-a456-426614174000";
+  const stored = new Map();
+  const base = {
+    id: `${sourceId}:12`,
+    student_name: "Student One",
+    student_username: "student.one",
+    class_name: "Class 1",
+    title: "Term Test",
+    subject: "Science",
+    exam_type: "quiz",
+    score: 4,
+    total: 10,
+    submitted_at: "2026-10-20T12:00:00",
+  };
+  const store = {
+    upsertExamResults: async (results) => results.forEach((result) => stored.set(result.id, result)),
+    deleteExamResults: async (ids) => ids.forEach((id) => stored.delete(id)),
+  };
+  const submit = (result) => handleAwsEvent(event("/api/sync/results", "POST", {
+    headers: {
+      host: "portal.execute-api.us-east-1.amazonaws.com",
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ source_id: sourceId, results: [result] }),
+  }), { SYNC_TOKEN: token, store });
+
+  const first = await submit(base);
+  const rewritten = await submit({ ...base, score: 8 });
+  assert.equal(first.statusCode, 200);
+  assert.equal(rewritten.statusCode, 200);
+  assert.equal(JSON.parse(rewritten.body).upserted, 1);
+  assert.equal(stored.size, 1);
+  assert.equal(stored.get(base.id).score, 8);
+
+  const removed = await handleAwsEvent(event("/api/sync/results/delete", "POST", {
+    headers: {
+      host: "portal.execute-api.us-east-1.amazonaws.com",
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ source_id: sourceId, ids: [base.id] }),
+  }), { SYNC_TOKEN: token, store });
+  assert.equal(removed.statusCode, 200);
+  assert.equal(JSON.parse(removed.body).deleted, 1);
+  assert.equal(stored.size, 0);
+});
+
+test("teacher results page passes only the signed-in teacher scopes to storage", async () => {
+  const { webcrypto } = require("node:crypto");
+  const token = "teacher-session-token";
+  const digest = await webcrypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  const sessionHash = Buffer.from(digest).toString("hex");
+  const result = {
+    id: "123e4567-e89b-12d3-a456-426614174000:12",
+    student_name: "Student One",
+    student_username: "student.one",
+    class_name: "Class 1",
+    title: "Term Test",
+    subject: "Science",
+    exam_type: "quiz",
+    score: 8,
+    total: 10,
+    submitted_at: "2026-10-20T12:00:00",
+  };
+  let requestedScopes;
+  const response = await handleAwsEvent(event("/results", "GET", {
+    headers: {
+      host: "portal.execute-api.us-east-1.amazonaws.com",
+      cookie: `portal_session=${token}`,
+    },
+  }), {
+    store: {
+      findTeacherForSession: async (hash) => hash === sessionHash ? {
+        id: "1", username: "ada.teacher", full_name: "Ada Teacher",
+        subjects: ["Science"], classes: ["Class 1"],
+      } : null,
+      getBranding: async () => ({ school_name: "North School", logo_present: false }),
+      listTeacherResults: async (subjects, classes) => {
+        requestedScopes = { subjects, classes };
+        return [result];
+      },
+    },
+  });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(requestedScopes, { subjects: ["Science"], classes: ["Class 1"] });
+  assert.match(response.body, /Student One/);
+  assert.match(response.body, /80\.0%/);
 });
 
 test("administrator account sync API rejects requests without the sync token", async () => {

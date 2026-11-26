@@ -2,6 +2,8 @@ export interface Teacher {
   id: string;
   username: string;
   full_name: string;
+  subjects: string[];
+  classes: string[];
 }
 
 export interface PortalAdmin {
@@ -23,6 +25,21 @@ export interface TeacherAccount {
   full_name: string;
   password_hash: string;
   active: boolean;
+  subjects?: string[];
+  classes?: string[];
+}
+
+export interface ExamResult {
+  id: string;
+  student_name: string;
+  student_username: string;
+  class_name: string;
+  title: string;
+  subject: string;
+  exam_type: string;
+  score: number;
+  total: number;
+  submitted_at: string;
 }
 
 export interface Submission {
@@ -118,6 +135,10 @@ export interface PortalStore {
   setTeacherActive(teacherId: string, active: boolean): Promise<void>;
   listTeacherAccounts(): Promise<TeacherAccount[]>;
   upsertTeacherAccount(account: TeacherAccount): Promise<void>;
+  updateTeacherScopes(username: string, subjects: string[], classes: string[]): Promise<void>;
+  upsertExamResults(results: ExamResult[]): Promise<void>;
+  deleteExamResults(ids: string[]): Promise<void>;
+  listTeacherResults(subjects: string[], classes: string[]): Promise<ExamResult[]>;
 }
 
 export interface ImageStore {

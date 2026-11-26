@@ -1,10 +1,11 @@
-import type { NewSubmission, PortalAdmin, PortalBranding, PortalEnv as Env, Submission, Teacher, TeacherAccount } from "./portal-store.js";
+import type { ExamResult, NewSubmission, PortalAdmin, PortalBranding, PortalEnv as Env, Submission, Teacher, TeacherAccount } from "./portal-store.js";
 
 const SESSION_SECONDS = 7 * 24 * 60 * 60;
 const RATE_LIMIT_WINDOW_SECONDS = 15 * 60;
 const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+const RESULT_ID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:[1-9]\d{0,14}$/;
 const PASSWORD_ITERATIONS = 100_000;
 const DEFAULT_BRANDING: PortalBranding = {
   school_name: "School Assessment Hub",
@@ -471,6 +472,7 @@ function dashboardPage(
   return page(
     "Teacher portal",
     `<h1>Teacher question portal</h1><p class="muted">Your questions are sent to the school administrator for review. Approval adds them to the local question bank; it does not publish an exam.</p>
+    <p><a class="button secondary" href="/results">View synced exam results</a></p>
     <details class="panel"><summary>Change your portal password</summary><form method="post" action="/change-password" class="grid">
     <label>Current password<input name="current_password" type="password" autocomplete="current-password" required maxlength="128"></label>
     <label>New password<input name="new_password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required></label>
@@ -510,6 +512,24 @@ function dashboardPage(
     branding,
     portalOrigin,
   );
+}
+
+function teacherResultsPage(teacher: Teacher, results: ExamResult[], branding = DEFAULT_BRANDING, portalOrigin = "https://portal.invalid") {
+  const rows = results.map((result) => {
+    const percentage = result.total ? (result.score / result.total * 100).toFixed(1) : "0.0";
+    const score = Number.isInteger(result.score) ? String(result.score) : result.score.toFixed(1);
+    return `<tr><td>${escapeHtml(result.submitted_at)}</td><td>${escapeHtml(result.class_name)}</td>
+      <td>${escapeHtml(result.student_name)}</td><td>${escapeHtml(result.title)}</td>
+      <td>${escapeHtml(result.subject)}</td><td>${escapeHtml(result.exam_type)}</td>
+      <td>${escapeHtml(score)} / ${escapeHtml(result.total)}</td><td>${percentage}%</td></tr>`;
+  }).join("");
+  const content = `<h1>Exam results</h1>
+    <p class="muted">Synced results for your assigned subjects and classes.</p>
+    ${results.length
+      ? `<section class="panel"><table><thead><tr><th>Submitted</th><th>Class</th><th>Student</th><th>Exam</th><th>Subject</th><th>Type</th><th>Score</th><th>Percent</th></tr></thead><tbody>${rows}</tbody></table></section>`
+      : `<section class="panel"><p>No synced results are available for your assigned subjects and classes.</p></section>`}
+    <p><a href="/">Back to teacher portal</a></p>`;
+  return page("Exam results", content, teacher, "", null, "", undefined, branding, portalOrigin);
 }
 
 function adminLoginPage(notice = "", branding = DEFAULT_BRANDING, portalOrigin = "https://portal.invalid") {
@@ -980,12 +1000,17 @@ async function syncTeacherAccount(request: Request, env: Env) {
   }
   const username = typeof body.username === "string" ? normalizeUsername(body.username) : "";
   const fullName = typeof body.full_name === "string" ? body.full_name.trim() : "";
+  const validScopes = (value: unknown) => value === undefined || (
+    Array.isArray(value) && value.length <= 100 &&
+    value.every((scope) => typeof scope === "string" && scope.length > 0 && scope.length <= 120)
+  );
   if (
     !/^[a-z0-9._-]{3,64}$/.test(username) ||
     fullName.length < 2 ||
     fullName.length > 100 ||
     !isPortablePasswordHash(body.password_hash) ||
-    typeof body.active !== "boolean"
+    typeof body.active !== "boolean" ||
+    !validScopes(body.subjects) || !validScopes(body.classes)
   ) {
     return json({ error: "Teacher account fields are invalid." }, 400);
   }
@@ -994,8 +1019,102 @@ async function syncTeacherAccount(request: Request, env: Env) {
     full_name: fullName,
     password_hash: body.password_hash,
     active: body.active,
+    subjects: Array.isArray(body.subjects) ? body.subjects as string[] : undefined,
+    classes: Array.isArray(body.classes) ? body.classes as string[] : undefined,
   });
   return json({ ok: true });
+}
+
+async function syncTeacherScopes(request: Request, env: Env) {
+  if (!await requireSyncToken(request, env)) return json({ error: "Unauthorized." }, 401);
+  let body: Record<string, unknown>;
+  try {
+    body = await readJson(request);
+  } catch {
+    return json({ error: "Invalid teacher permission update." }, 400);
+  }
+  const username = typeof body.username === "string" ? normalizeUsername(body.username) : "";
+  const validScopes = (value: unknown) => Array.isArray(value) && value.length <= 100 &&
+    value.every((scope) => typeof scope === "string" && scope.length > 0 && scope.length <= 120);
+  if (!/^[a-z0-9._-]{3,64}$/.test(username) || !validScopes(body.subjects) || !validScopes(body.classes)) {
+    return json({ error: "Teacher permission fields are invalid." }, 400);
+  }
+  await env.store.updateTeacherScopes(username, body.subjects as string[], body.classes as string[]);
+  return json({ ok: true });
+}
+
+async function syncExamResults(request: Request, env: Env) {
+  if (!await requireSyncToken(request, env)) return json({ error: "Unauthorized." }, 401);
+  let body: Record<string, unknown>;
+  try {
+    body = await readJson(request);
+  } catch {
+    return json({ error: "Invalid or oversized result batch." }, 400);
+  }
+  const sourceId = body.source_id;
+  const input = body.results;
+  if (typeof sourceId !== "string" || !UUID_PATTERN.test(sourceId) || !Array.isArray(input) || input.length < 1 || input.length > 100) {
+    return json({ error: "Submit between 1 and 100 exam results." }, 400);
+  }
+  const seen = new Set<string>();
+  const results: ExamResult[] = [];
+  const validText = (value: unknown, min: number, max: number) =>
+    typeof value === "string" && value.length >= min && value.length <= max;
+  for (const entry of input) {
+    if (!entry || typeof entry !== "object") return json({ error: "Invalid exam result." }, 400);
+    const item = entry as Record<string, unknown>;
+    const id = item.id;
+    const score = item.score;
+    const total = item.total;
+    if (
+      typeof id !== "string" || !RESULT_ID_PATTERN.test(id) || !id.startsWith(`${sourceId}:`) || seen.has(id) ||
+      !validText(item.student_name, 1, 200) || !validText(item.student_username, 1, 200) ||
+      !validText(item.class_name, 0, 120) || !validText(item.title, 1, 255) ||
+      !validText(item.subject, 1, 255) || !validText(item.exam_type, 1, 40) ||
+      typeof score !== "number" || !Number.isFinite(score) || score < 0 ||
+      typeof total !== "number" || !Number.isInteger(total) || total < 1 || score > total ||
+      !validText(item.submitted_at, 1, 40)
+    ) return json({ error: "Exam result fields are invalid." }, 400);
+    seen.add(id);
+    results.push({
+      id,
+      student_name: item.student_name as string,
+      student_username: item.student_username as string,
+      class_name: item.class_name as string,
+      title: item.title as string,
+      subject: item.subject as string,
+      exam_type: item.exam_type as string,
+      score,
+      total,
+      submitted_at: item.submitted_at as string,
+    });
+  }
+  await env.store.upsertExamResults(results);
+  return json({ ok: true, upserted: results.length });
+}
+
+async function deleteSyncedExamResults(request: Request, env: Env) {
+  if (!await requireSyncToken(request, env)) return json({ error: "Unauthorized." }, 401);
+  let body: Record<string, unknown>;
+  try {
+    body = await readJson(request);
+  } catch {
+    return json({ error: "Invalid result removal request." }, 400);
+  }
+  const sourceId = body.source_id;
+  const ids = body.ids;
+  if (typeof sourceId !== "string" || !UUID_PATTERN.test(sourceId) || !Array.isArray(ids) || ids.length < 1 || ids.length > 100) {
+    return json({ error: "Submit between 1 and 100 valid result ids." }, 400);
+  }
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (typeof id !== "string" || !RESULT_ID_PATTERN.test(id) || !id.startsWith(`${sourceId}:`) || seen.has(id)) {
+      return json({ error: "Result ids must belong to the supplied source." }, 400);
+    }
+    seen.add(id);
+  }
+  await env.store.deleteExamResults(ids as string[]);
+  return json({ ok: true, deleted: ids.length });
 }
 
 async function setPortalAdmin(request: Request, env: Env) {
@@ -1285,6 +1404,9 @@ async function router(request: Request, env: Env): Promise<Response> {
     if (method === "GET" && path === "/api/sync/admins") return syncAdminAccounts(request, env);
     if (method === "POST" && path === "/api/sync/branding") return syncBranding(request, env);
     if (method === "POST" && path === "/api/sync/teachers/upsert") return syncTeacherAccount(request, env);
+    if (method === "POST" && path === "/api/sync/teachers/scopes") return syncTeacherScopes(request, env);
+    if (method === "POST" && path === "/api/sync/results") return syncExamResults(request, env);
+    if (method === "POST" && path === "/api/sync/results/delete") return deleteSyncedExamResults(request, env);
     if (method === "POST" && path === "/api/sync/admin/set-password") return setPortalAdmin(request, env);
     if (method === "POST" && path === "/api/sync/decisions") return syncDecisions(request, env);
     if (method === "POST" && path === "/api/sync/teachers/reset-password") {
@@ -1333,6 +1455,11 @@ async function router(request: Request, env: Env): Promise<Response> {
   }
 
   const teacher = await getTeacher(request, env);
+  if (method === "GET" && path === "/results") {
+    if (!teacher) return redirect("/login");
+    const results = await env.store.listTeacherResults(teacher.subjects, teacher.classes);
+    return teacherResultsPage(teacher, results, await env.store.getBranding(), requestPortalOrigin(request));
+  }
   if (path === "/") {
     const branding = await env.store.getBranding();
     if (!teacher) return loginPage(url.searchParams.get("notice") ?? "", true, branding, requestPortalOrigin(request));

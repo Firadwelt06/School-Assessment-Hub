@@ -27,6 +27,7 @@ from cloud_sync import (
     get_portal_teacher_directory,
     get_portal_admin_directory,
     sync_question_submissions,
+    sync_exam_results,
     sync_school_branding,
 )
 from lan_discovery import LanDiscoveryError, LanServiceDiscovery
@@ -326,6 +327,9 @@ def init_mysql_db():
         """CREATE TABLE IF NOT EXISTS teacher_sync_conflicts (
             username VARCHAR(255) PRIMARY KEY, detected_at VARCHAR(40) NOT NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+        """CREATE TABLE IF NOT EXISTS portal_result_sync_state (
+            result_id VARCHAR(64) PRIMARY KEY
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
     ]
     try:
         with connection.cursor() as cursor:
@@ -433,6 +437,9 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS teacher_sync_conflicts (
             username TEXT PRIMARY KEY, detected_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS portal_result_sync_state (
+            result_id TEXT PRIMARY KEY
         );
         """
     )
@@ -2734,6 +2741,7 @@ def sync_admin_question_submissions():
     try:
         teachers = sync_teacher_accounts(DB_ENGINE, db)
         result = sync_question_submissions(DB_ENGINE, db, UPLOAD_DIR)
+        results = sync_exam_results(DB_ENGINE, db)
         synced_school_name = sync_school_branding(school_settings(), UPLOAD_DIR)
     except PortalSyncError as error:
         flash(str(error), "error")
@@ -2742,6 +2750,7 @@ def sync_admin_question_submissions():
             f"Sync complete: downloaded {result['imported']} new question submission(s), "
             f"sent {result['decisions_synced']} review decision(s), "
             f"applied {result['online_reviews_applied']} online review decision(s), "
+            f"synced {results['synced']} exam result snapshot(s), "
             f"imported {teachers['imported']} teacher account(s), and updated {teachers['pushed']} online account(s)."
             f" School branding for {synced_school_name} was synced to the portal."
         )

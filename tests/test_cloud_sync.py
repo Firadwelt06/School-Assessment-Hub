@@ -18,6 +18,7 @@ from cloud_sync import (
     sync_teacher_accounts,
     sync_question_submissions,
     sync_school_branding,
+    sync_exam_results,
 )
 
 
@@ -59,6 +60,18 @@ class CloudSyncTests(unittest.TestCase):
                 CREATE TABLE teacher_sync_conflicts (
                     username TEXT PRIMARY KEY, detected_at TEXT NOT NULL
                 );
+                CREATE TABLE settings (`key` TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE portal_result_sync_state (result_id TEXT PRIMARY KEY);
+                CREATE TABLE exams (
+                    id INTEGER PRIMARY KEY, title TEXT, subject TEXT, exam_type TEXT
+                );
+                CREATE TABLE attempts (
+                    id INTEGER PRIMARY KEY, exam_id INTEGER, student_id INTEGER,
+                    score REAL, total INTEGER, submitted_at TEXT
+                );
+                CREATE TABLE teacher_class_assignments (
+                    teacher_id INTEGER, class_name TEXT, PRIMARY KEY (teacher_id, class_name)
+                );
                 CREATE TABLE questions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, subject TEXT, topic TEXT,
                     class_name TEXT, image_path TEXT, stem TEXT, option_a TEXT,
@@ -80,6 +93,56 @@ class CloudSyncTests(unittest.TestCase):
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def test_result_sync_reuses_attempt_id_and_updates_rewritten_score(self):
+        with closing(self.connect()) as connection:
+            connection.execute(
+                "INSERT INTO users(username, full_name, role, class_name) VALUES ('student.one', 'Student One', 'student', 'Class 1')"
+            )
+            connection.execute(
+                "INSERT INTO exams(id, title, subject, exam_type) VALUES (7, 'Term Test', 'Science', 'quiz')"
+            )
+            connection.execute(
+                "INSERT INTO attempts(id, exam_id, student_id, score, total, submitted_at) "
+                "VALUES (12, 7, 2, 4, 10, '2026-10-20T12:00:00')"
+            )
+            connection.commit()
+
+        portal_records = {}
+
+        def portal_request(path, method="GET", payload=None, **kwargs):
+            self.assertEqual(method, "POST")
+            if path == "/api/sync/results":
+                for result in payload["results"]:
+                    portal_records[result["id"]] = result
+                return {"ok": True, "upserted": len(payload["results"])}
+            if path == "/api/sync/results/delete":
+                for result_id in payload["ids"]:
+                    portal_records.pop(result_id, None)
+                return {"ok": True, "deleted": len(payload["ids"])}
+            raise AssertionError(f"Unexpected portal request: {path}")
+
+        with patch("cloud_sync.portal_request", side_effect=portal_request):
+            first = sync_exam_results("sqlite", self.connect)
+            with closing(self.connect()) as connection:
+                connection.execute("UPDATE attempts SET score = 8 WHERE id = 12")
+                connection.commit()
+            second = sync_exam_results("sqlite", self.connect)
+
+        self.assertEqual(first, {"synced": 1, "deleted": 0})
+        self.assertEqual(second, {"synced": 1, "deleted": 0})
+        self.assertEqual(len(portal_records), 1)
+        result = next(iter(portal_records.values()))
+        self.assertEqual(result["id"].split(":", 1)[1], "12")
+        self.assertEqual(result["score"], 8)
+
+        with closing(self.connect()) as connection:
+            connection.execute("DELETE FROM attempts WHERE id = 12")
+            connection.commit()
+        with patch("cloud_sync.portal_request", side_effect=portal_request):
+            removed = sync_exam_results("sqlite", self.connect)
+        self.assertEqual(removed, {"synced": 0, "deleted": 1})
+        self.assertEqual(portal_records, {})
 
     def test_portal_requests_send_sync_token_as_bearer_authorization(self):
         response = MagicMock()
@@ -351,13 +414,45 @@ class CloudSyncTests(unittest.TestCase):
 
         self.assertEqual(result, {"imported": 0, "pushed": 1, "conflicts": []})
         self.assertEqual(calls[0][0], "/api/sync/teachers")
-        self.assertEqual(calls[1][2], account)
+        self.assertEqual(calls[1][2], {**account, "subjects": [], "classes": []})
         with closing(self.connect()) as connection:
             baseline = connection.execute(
                 "SELECT synced_fingerprint FROM teacher_sync_state WHERE username = ?",
                 (account["username"],),
             ).fetchone()
         self.assertIsNotNone(baseline)
+
+    def test_teacher_sync_pushes_changed_subject_and_class_scopes(self):
+        username = "ada.teacher"
+        account = {
+            "username": username,
+            "full_name": "Ada Teacher",
+            "password_hash": "a" * 32 + "$" + "b" * 64,
+            "active": True,
+        }
+        with closing(self.connect()) as connection:
+            connection.execute(
+                "INSERT INTO users(username, full_name, password_hash, role, subjects, active) "
+                "VALUES (?, ?, ?, 'teacher', 'Science', 1)",
+                (username, account["full_name"], account["password_hash"]),
+            )
+            connection.execute(
+                "INSERT INTO teacher_class_assignments(teacher_id, class_name) VALUES (2, 'Class 1')"
+            )
+            connection.commit()
+        calls = []
+
+        def portal_request(path, method="GET", payload=None, **kwargs):
+            calls.append((path, payload))
+            return {"teachers": [account]} if path == "/api/sync/teachers" else {"ok": True}
+
+        with patch("cloud_sync.portal_request", side_effect=portal_request):
+            result = sync_teacher_accounts("sqlite", self.connect)
+
+        self.assertEqual(result["pushed"], 1)
+        self.assertEqual(calls[-1][0], "/api/sync/teachers/scopes")
+        self.assertEqual(calls[-1][1]["subjects"], ["Science"])
+        self.assertEqual(calls[-1][1]["classes"], ["Class 1"])
 
     def test_teacher_sync_imports_portal_account_hash(self):
         account = {

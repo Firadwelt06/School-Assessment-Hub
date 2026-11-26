@@ -7,6 +7,7 @@ import secrets
 import urllib.parse
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 
@@ -289,6 +290,14 @@ def teacher_account_fingerprint(account):
 
 
 def _valid_teacher_account(account):
+    valid_scopes = lambda name: (
+        account.get(name) is None
+        or (
+            isinstance(account[name], list)
+            and len(account[name]) <= 100
+            and all(isinstance(value, str) and 1 <= len(value) <= 120 for value in account[name])
+        )
+    )
     return (
         isinstance(account, dict)
         and isinstance(account.get("username"), str)
@@ -304,6 +313,8 @@ def _valid_teacher_account(account):
             )
         )
         and isinstance(account.get("active"), bool)
+        and valid_scopes("subjects")
+        and valid_scopes("classes")
     )
 
 
@@ -374,6 +385,123 @@ def _database_write(database_engine, database_factory, sql, params=()):
         connection.close()
 
 
+def sync_exam_results(database_engine, database_factory):
+    source_rows = _database_rows(
+        database_engine,
+        database_factory,
+        "SELECT value FROM settings WHERE `key` = ?",
+        ("portal_sync_source_id",),
+    )
+    if source_rows:
+        source_id = source_rows[0]["value"]
+    else:
+        source_id = str(uuid.uuid4())
+        if database_engine == "mysql":
+            insert_sql = """INSERT INTO settings (`key`, value) VALUES (?, ?)
+            ON DUPLICATE KEY UPDATE value = value"""
+        else:
+            insert_sql = "INSERT OR IGNORE INTO settings (`key`, value) VALUES (?, ?)"
+        _database_write(database_engine, database_factory, insert_sql, ("portal_sync_source_id", source_id))
+        source_rows = _database_rows(
+            database_engine,
+            database_factory,
+            "SELECT value FROM settings WHERE `key` = ?",
+            ("portal_sync_source_id",),
+        )
+        source_id = source_rows[0]["value"]
+
+    try:
+        source_id = str(uuid.UUID(source_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise PortalSyncError("The local portal sync identifier is invalid.") from error
+
+    rows = _database_rows(
+        database_engine,
+        database_factory,
+        """SELECT a.id AS attempt_id, u.full_name AS student_name, u.username AS student_username,
+        u.class_name, e.title, e.subject, e.exam_type, a.score, a.total, a.submitted_at
+        FROM attempts a
+        JOIN users u ON u.id = a.student_id
+        JOIN exams e ON e.id = a.exam_id
+        WHERE u.role = 'student' AND a.submitted_at != ''
+        ORDER BY a.submitted_at, a.id""",
+    )
+    results = [
+        {
+            "id": f"{source_id}:{row['attempt_id']}",
+            "student_name": row["student_name"],
+            "student_username": row["student_username"],
+            "class_name": row["class_name"],
+            "title": row["title"],
+            "subject": row["subject"],
+            "exam_type": row["exam_type"],
+            "score": float(row["score"]),
+            "total": int(row["total"]),
+            "submitted_at": row["submitted_at"],
+        }
+        for row in rows
+    ]
+
+    for offset in range(0, len(results), 100):
+        batch = results[offset:offset + 100]
+        response = portal_request(
+            "/api/sync/results",
+            method="POST",
+            payload={"source_id": source_id, "results": batch},
+        )
+        if response.get("ok") is not True or response.get("upserted") != len(batch):
+            raise PortalSyncError("The teacher portal did not confirm the exam result sync.")
+
+    current_ids = {result["id"] for result in results}
+    synced_ids = {
+        row["result_id"]
+        for row in _database_rows(
+            database_engine,
+            database_factory,
+            "SELECT result_id FROM portal_result_sync_state",
+        )
+    }
+    removed_ids = sorted(synced_ids - current_ids)
+    for offset in range(0, len(removed_ids), 100):
+        batch = removed_ids[offset:offset + 100]
+        response = portal_request(
+            "/api/sync/results/delete",
+            method="POST",
+            payload={"source_id": source_id, "ids": batch},
+        )
+        if response.get("ok") is not True or response.get("deleted") != len(batch):
+            raise PortalSyncError("The teacher portal did not confirm removal of deleted exam results.")
+
+    _replace_result_sync_state(database_engine, database_factory, sorted(current_ids))
+    return {"synced": len(results), "deleted": len(removed_ids)}
+
+
+def _replace_result_sync_state(database_engine, database_factory, result_ids):
+    connection = database_factory()
+    try:
+        if database_engine == "mysql":
+            with connection.cursor() as cursor:
+                cursor.execute("DELETE FROM portal_result_sync_state")
+                if result_ids:
+                    cursor.executemany(
+                        "INSERT INTO portal_result_sync_state(result_id) VALUES (%s)",
+                        [(result_id,) for result_id in result_ids],
+                    )
+        else:
+            connection.execute("DELETE FROM portal_result_sync_state")
+            if result_ids:
+                connection.executemany(
+                    "INSERT INTO portal_result_sync_state(result_id) VALUES (?)",
+                    [(result_id,) for result_id in result_ids],
+                )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
 def _save_sync_baseline(database_engine, database_factory, username, fingerprint):
     if database_engine == "mysql":
         sql = """INSERT INTO teacher_sync_state(username, synced_fingerprint) VALUES (?, ?)
@@ -407,19 +535,27 @@ def sync_teacher_accounts(database_engine, database_factory):
     if not isinstance(accounts, list) or any(not _valid_teacher_account(item) for item in accounts):
         raise PortalSyncError("The portal returned an invalid teacher account directory.")
     remote_accounts = {account["username"]: account for account in accounts}
-    local_accounts = {
-        row["username"]: {
+    local_accounts = {}
+    assignments = {}
+    for row in _database_rows(
+        database_engine,
+        database_factory,
+        "SELECT teacher_id, class_name FROM teacher_class_assignments ORDER BY class_name",
+    ):
+        assignments.setdefault(row["teacher_id"], []).append(row["class_name"])
+    for row in _database_rows(
+        database_engine,
+        database_factory,
+        "SELECT id, username, full_name, password_hash, active, subjects FROM users WHERE role = 'teacher'",
+    ):
+        local_accounts[row["username"]] = {
             "username": row["username"],
             "full_name": row["full_name"],
             "password_hash": row["password_hash"],
             "active": bool(row["active"]),
+            "subjects": sorted({value.strip() for value in (row["subjects"] or "").split(",") if value.strip()}),
+            "classes": sorted(set(assignments.get(row["id"], []))),
         }
-        for row in _database_rows(
-            database_engine,
-            database_factory,
-            "SELECT username, full_name, password_hash, active FROM users WHERE role = 'teacher'",
-        )
-    }
     baselines = {
         row["username"]: row["synced_fingerprint"]
         for row in _database_rows(
@@ -463,6 +599,7 @@ def sync_teacher_accounts(database_engine, database_factory):
             continue
         local_fingerprint = teacher_account_fingerprint(local)
         remote_fingerprint = teacher_account_fingerprint(remote)
+        account_pushed = False
         if local_fingerprint == remote_fingerprint:
             _save_sync_baseline(database_engine, database_factory, username, local_fingerprint)
         elif baseline is None:
@@ -474,6 +611,7 @@ def sync_teacher_accounts(database_engine, database_factory):
             if local_changed and not remote_changed:
                 portal_request("/api/sync/teachers/upsert", method="POST", payload=local)
                 pushed += 1
+                account_pushed = True
                 _save_sync_baseline(database_engine, database_factory, username, local_fingerprint)
             elif remote_changed and not local_changed:
                 _database_write(
@@ -483,11 +621,30 @@ def sync_teacher_accounts(database_engine, database_factory):
                     WHERE username = ? AND role = 'teacher'""",
                     (remote["full_name"], remote["password_hash"], int(remote["active"]), username),
                 )
+                local.update({
+                    "full_name": remote["full_name"],
+                    "password_hash": remote["password_hash"],
+                    "active": remote["active"],
+                })
                 imported += 1
                 _save_sync_baseline(database_engine, database_factory, username, remote_fingerprint)
             else:
                 _record_sync_conflict(database_engine, database_factory, username)
                 conflicts.append(username)
+        if (
+            not account_pushed
+            and (remote.get("subjects", []) != local["subjects"] or remote.get("classes", []) != local["classes"])
+        ):
+            portal_request(
+                "/api/sync/teachers/scopes",
+                method="POST",
+                payload={
+                    "username": username,
+                    "subjects": local["subjects"],
+                    "classes": local["classes"],
+                },
+            )
+            pushed += 1
     return {"imported": imported, "pushed": pushed, "conflicts": conflicts}
 
 

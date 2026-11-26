@@ -6,10 +6,20 @@ import type {
   PortalBranding,
   PortalStore,
   RateLimitRecord,
+  ExamResult,
   Submission,
   TeacherAccount,
   Teacher,
 } from "./portal-store.js";
+
+function parseScopes(value: string | null | undefined): string[] {
+  try {
+    const parsed: unknown = JSON.parse(value ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((scope): scope is string => typeof scope === "string") : [];
+  } catch {
+    return [];
+  }
+}
 
 export class D1PortalStore implements PortalStore {
   constructor(private readonly db: D1Database) {}
@@ -53,20 +63,36 @@ export class D1PortalStore implements PortalStore {
 
   async findTeacherForSession(tokenHash: string, now: number) {
     const teacher = await this.db.prepare(
-      `SELECT teachers.id, teachers.username, teachers.full_name
+      `SELECT teachers.id, teachers.username, teachers.full_name, teachers.subjects, teachers.classes
        FROM sessions JOIN teachers ON teachers.id = sessions.teacher_id
        WHERE sessions.token_hash = ? AND sessions.expires_at > ? AND teachers.active = 1`,
-    ).bind(tokenHash, now).first<Teacher & { id: number }>();
-    return teacher ? { ...teacher, id: String(teacher.id) } : null;
+    ).bind(tokenHash, now).first<{
+      id: number; username: string; full_name: string; subjects: string; classes: string;
+    }>();
+    return teacher ? {
+        ...teacher,
+        id: String(teacher.id),
+        subjects: parseScopes(teacher.subjects),
+        classes: parseScopes(teacher.classes),
+      } : null;
   }
 
   async findTeacherForLogin(username: string) {
     const teacher = await this.db.prepare(
-      "SELECT id, username, full_name, password_hash, active FROM teachers WHERE username = ? AND active = 1",
-    ).bind(username).first<Omit<Teacher, "id"> & { id: number; password_hash: string; active: number }>();
+      "SELECT id, username, full_name, password_hash, active, subjects, classes FROM teachers WHERE username = ? AND active = 1",
+    ).bind(username).first<{
+      id: number; username: string; full_name: string; password_hash: string; active: number;
+      subjects: string; classes: string;
+    }>();
     return teacher
-      ? { ...teacher, id: String(teacher.id), active: Boolean(teacher.active) }
-      : null;
+        ? {
+          ...teacher,
+          id: String(teacher.id),
+          active: Boolean(teacher.active),
+          subjects: parseScopes(teacher.subjects),
+          classes: parseScopes(teacher.classes),
+        }
+        : null;
   }
 
   async createTeacher(input: {
@@ -290,15 +316,25 @@ export class D1PortalStore implements PortalStore {
 
   async listTeacherAccounts() {
     const result = await this.db.prepare(
-      "SELECT username, full_name, password_hash, active FROM teachers ORDER BY username",
-    ).all<{ username: string; full_name: string; password_hash: string; active: number }>();
-    return result.results.map((item) => ({ ...item, active: Boolean(item.active) }));
+      "SELECT username, full_name, password_hash, active, subjects, classes FROM teachers ORDER BY username",
+    ).all<{
+      username: string; full_name: string; password_hash: string; active: number;
+      subjects: string; classes: string;
+    }>();
+    return result.results.map((item) => ({
+      ...item,
+      active: Boolean(item.active),
+      subjects: parseScopes(item.subjects),
+      classes: parseScopes(item.classes),
+    }));
   }
 
   async upsertTeacherAccount(account: TeacherAccount) {
     const current = await this.db.prepare(
-      "SELECT id, password_hash, active FROM teachers WHERE username = ?",
-    ).bind(account.username).first<{ id: number; password_hash: string; active: number }>();
+      "SELECT id, password_hash, active, subjects, classes FROM teachers WHERE username = ?",
+    ).bind(account.username).first<{
+      id: number; password_hash: string; active: number; subjects: string; classes: string;
+    }>();
     if (
       current &&
       (current.password_hash !== account.password_hash ||
@@ -307,11 +343,62 @@ export class D1PortalStore implements PortalStore {
       await this.deleteTeacherSessions(String(current.id));
     }
     await this.db.prepare(
-      `INSERT INTO teachers(username, full_name, password_hash, active, created_at)
-       VALUES (?, ?, ?, ?, ?)
+      `INSERT INTO teachers(username, full_name, password_hash, active, created_at, subjects, classes)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(username) DO UPDATE SET full_name = excluded.full_name,
-       password_hash = excluded.password_hash, active = excluded.active`,
-    ).bind(account.username, account.full_name, account.password_hash, Number(account.active), new Date().toISOString()).run();
+       password_hash = excluded.password_hash, active = excluded.active,
+       subjects = excluded.subjects, classes = excluded.classes`,
+    ).bind(
+      account.username,
+      account.full_name,
+      account.password_hash,
+      Number(account.active),
+      new Date().toISOString(),
+      JSON.stringify(account.subjects ?? parseScopes(current?.subjects)),
+      JSON.stringify(account.classes ?? parseScopes(current?.classes)),
+    ).run();
+  }
+
+  async updateTeacherScopes(username: string, subjects: string[], classes: string[]) {
+    await this.db.prepare(
+      "UPDATE teachers SET subjects = ?, classes = ? WHERE username = ?",
+    ).bind(JSON.stringify(subjects), JSON.stringify(classes), username).run();
+  }
+
+  async upsertExamResults(results: ExamResult[]) {
+    if (!results.length) return;
+    await this.db.batch(results.map((result) => this.db.prepare(
+      `INSERT INTO exam_results
+       (id, student_name, student_username, class_name, title, subject, exam_type, score, total, submitted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET student_name = excluded.student_name,
+       student_username = excluded.student_username, class_name = excluded.class_name,
+       title = excluded.title, subject = excluded.subject, exam_type = excluded.exam_type,
+       score = excluded.score, total = excluded.total, submitted_at = excluded.submitted_at`,
+    ).bind(
+      result.id, result.student_name, result.student_username, result.class_name,
+      result.title, result.subject, result.exam_type, result.score, result.total, result.submitted_at,
+    )));
+  }
+
+  async deleteExamResults(ids: string[]) {
+    if (!ids.length) return;
+    await this.db.batch(ids.map((id) => this.db.prepare(
+      "DELETE FROM exam_results WHERE id = ?",
+    ).bind(id)));
+  }
+
+  async listTeacherResults(subjects: string[], classes: string[]) {
+    if (!subjects.length || !classes.length) return [];
+    const subjectMarks = subjects.map(() => "?").join(", ");
+    const classMarks = classes.map(() => "?").join(", ");
+    const result = await this.db.prepare(
+      `SELECT id, student_name, student_username, class_name, title, subject, exam_type,
+       score, total, submitted_at FROM exam_results
+       WHERE subject IN (${subjectMarks}) AND class_name IN (${classMarks})
+       ORDER BY submitted_at DESC LIMIT 250`,
+    ).bind(...subjects, ...classes).all<ExamResult>();
+    return result.results;
   }
 }
 

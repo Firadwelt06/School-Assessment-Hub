@@ -46,6 +46,7 @@ Resources:
           RATE_LIMITS_TABLE: !Ref RateLimitsTable
           IMAGE_UPLOADS_TABLE: !Ref ImageUploadsTable
           SETTINGS_TABLE: !Ref SettingsTable
+          EXAM_RESULTS_TABLE: !Ref ExamResultsTable
           SUBMISSION_IMAGES_BUCKET: !Ref SubmissionImages
           SCHOOL_SIGNUP_CODE: ""
           SYNC_TOKEN: ""
@@ -69,6 +70,8 @@ Resources:
                 - !GetAtt RateLimitsTable.Arn
                 - !GetAtt ImageUploadsTable.Arn
                 - !GetAtt SettingsTable.Arn
+                - !GetAtt ExamResultsTable.Arn
+                - !Sub "${ExamResultsTable.Arn}/index/*"
             - Effect: Allow
               Action:
                 - s3:GetObject
@@ -202,6 +205,32 @@ Resources:
       KeySchema:
         - AttributeName: setting_key
           KeyType: HASH
+
+  ExamResultsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: scope_key
+          AttributeType: S
+        - AttributeName: submitted_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: SubjectClassSubmittedIndex
+          KeySchema:
+            - AttributeName: scope_key
+              KeyType: HASH
+            - AttributeName: submitted_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
 
   SubmissionImages:
     Type: AWS::S3::Bucket

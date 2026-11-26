@@ -21,6 +21,7 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type {
   ImageStore,
+  ExamResult,
   NewSubmission,
   PortalBranding,
   PortalAdminAccount,
@@ -38,6 +39,7 @@ type AwsPortalConfig = {
   rateLimitsTable: string;
   imageUploadsTable: string;
   settingsTable: string;
+  examResultsTable: string;
   imagesBucket: string;
 };
 
@@ -48,6 +50,7 @@ const config: AwsPortalConfig = {
   rateLimitsTable: requiredEnvironment("RATE_LIMITS_TABLE"),
   imageUploadsTable: requiredEnvironment("IMAGE_UPLOADS_TABLE"),
   settingsTable: requiredEnvironment("SETTINGS_TABLE"),
+  examResultsTable: requiredEnvironment("EXAM_RESULTS_TABLE"),
   imagesBucket: requiredEnvironment("SUBMISSION_IMAGES_BUCKET"),
 };
 
@@ -177,11 +180,13 @@ export class DynamoPortalStore implements PortalStore {
       ConsistentRead: true,
     }));
     if (!teacher.Item || !teacher.Item.active) return null;
-    return {
-      id: String(teacher.Item.id),
-      username: String(teacher.Item.username),
-      full_name: String(teacher.Item.full_name),
-    };
+      return {
+        id: String(teacher.Item.id),
+        username: String(teacher.Item.username),
+        full_name: String(teacher.Item.full_name),
+        subjects: Array.isArray(teacher.Item.subjects) ? teacher.Item.subjects.map(String) : [],
+        classes: Array.isArray(teacher.Item.classes) ? teacher.Item.classes.map(String) : [],
+      };
   }
 
   async findTeacherForLogin(username: string): Promise<(Teacher & { password_hash: string; active: boolean }) | null> {
@@ -192,13 +197,15 @@ export class DynamoPortalStore implements PortalStore {
     }));
     const item = result.Item;
     if (!item?.active || item.account_type === "admin") return null;
-    return {
-      id: String(item.id),
-      username: String(item.username),
-      full_name: String(item.full_name),
-      password_hash: String(item.password_hash),
-      active: Boolean(item.active),
-    };
+      return {
+        id: String(item.id),
+        username: String(item.username),
+        full_name: String(item.full_name),
+        password_hash: String(item.password_hash),
+        active: Boolean(item.active),
+        subjects: Array.isArray(item.subjects) ? item.subjects.map(String) : [],
+        classes: Array.isArray(item.classes) ? item.classes.map(String) : [],
+      };
   }
 
   async createTeacher(input: {
@@ -211,7 +218,7 @@ export class DynamoPortalStore implements PortalStore {
     try {
       await dynamo.send(new PutCommand({
         TableName: config.teachersTable,
-        Item: { ...input, active: true },
+        Item: { ...input, active: true, subjects: [], classes: [] },
         ConditionExpression: "attribute_not_exists(username)",
       }));
       return true;
@@ -635,6 +642,8 @@ export class DynamoPortalStore implements PortalStore {
           full_name: String(item.full_name),
           password_hash: String(item.password_hash),
           active: Boolean(item.active),
+          subjects: Array.isArray(item.subjects) ? item.subjects.map(String) : [],
+          classes: Array.isArray(item.classes) ? item.classes.map(String) : [],
         });
       }
       lastKey = page.LastEvaluatedKey;
@@ -655,6 +664,8 @@ export class DynamoPortalStore implements PortalStore {
     ) {
       await this.deleteTeacherSessions(account.username);
     }
+    const currentSubjects = Array.isArray(current.Item?.subjects) ? current.Item.subjects : [];
+    const currentClasses = Array.isArray(current.Item?.classes) ? current.Item.classes : [];
     await dynamo.send(new PutCommand({
       TableName: config.teachersTable,
       Item: {
@@ -663,10 +674,67 @@ export class DynamoPortalStore implements PortalStore {
         full_name: account.full_name,
         password_hash: account.password_hash,
         active: account.active,
+        subjects: account.subjects ?? currentSubjects,
+        classes: account.classes ?? currentClasses,
         account_type: "teacher",
         created_at: new Date().toISOString(),
       },
     }));
+  }
+
+  async upsertExamResults(results: ExamResult[]) {
+    await Promise.all(results.map((result) => dynamo.send(new PutCommand({
+      TableName: config.examResultsTable,
+      Item: {
+        ...result,
+        scope_key: JSON.stringify([result.subject, result.class_name]),
+      },
+    }))));
+  }
+
+  async deleteExamResults(ids: string[]) {
+    await Promise.all(ids.map((id) => dynamo.send(new DeleteCommand({
+      TableName: config.examResultsTable,
+      Key: { id },
+    }))));
+  }
+
+  async updateTeacherScopes(username: string, subjects: string[], classes: string[]) {
+    await dynamo.send(new UpdateCommand({
+      TableName: config.teachersTable,
+      Key: { username },
+      UpdateExpression: "SET subjects = :subjects, classes = :classes",
+      ExpressionAttributeValues: { ":subjects": subjects, ":classes": classes },
+      ConditionExpression: "attribute_exists(username)",
+    }));
+  }
+
+  async listTeacherResults(subjects: string[], classes: string[]) {
+    if (!subjects.length || !classes.length) return [];
+    const scopeKeys = subjects.flatMap((subject) =>
+      classes.map((className) => JSON.stringify([subject, className])),
+    );
+    const scopedResults = await Promise.all(scopeKeys.map(async (scopeKey) => {
+      const results: ExamResult[] = [];
+      let lastKey: Record<string, unknown> | undefined;
+      do {
+        const page = await dynamo.send(new QueryCommand({
+          TableName: config.examResultsTable,
+          IndexName: "SubjectClassSubmittedIndex",
+          KeyConditionExpression: "scope_key = :scope_key",
+          ExpressionAttributeValues: { ":scope_key": scopeKey },
+          ScanIndexForward: false,
+          Limit: 250 - results.length,
+          ExclusiveStartKey: lastKey,
+        }));
+        results.push(...(page.Items ?? []) as ExamResult[]);
+        lastKey = page.LastEvaluatedKey;
+      } while (lastKey && results.length < 250);
+      return results;
+    }));
+    return scopedResults.flat()
+      .sort((left, right) => right.submitted_at.localeCompare(left.submitted_at))
+      .slice(0, 250);
   }
 }
 
