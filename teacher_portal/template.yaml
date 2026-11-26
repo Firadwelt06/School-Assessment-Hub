@@ -2,6 +2,16 @@ AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: School Assessment Hub teacher portal API on AWS
 
+Parameters:
+  SchoolSignupCode:
+    Type: String
+    NoEcho: true
+    Description: Shared code teachers use to create portal accounts
+  PortalSyncToken:
+    Type: String
+    NoEcho: true
+    Description: Private bearer token shared with the local school app
+
 Globals:
   Function:
     Runtime: nodejs22.x
@@ -48,8 +58,8 @@ Resources:
           SETTINGS_TABLE: !Ref SettingsTable
           EXAM_RESULTS_TABLE: !Ref ExamResultsTable
           SUBMISSION_IMAGES_BUCKET: !Ref SubmissionImages
-          SCHOOL_SIGNUP_CODE: ""
-          SYNC_TOKEN: ""
+          SCHOOL_SIGNUP_CODE: !Ref SchoolSignupCode
+          SYNC_TOKEN: !Ref PortalSyncToken
       Policies:
         - Statement:
             - Effect: Allow

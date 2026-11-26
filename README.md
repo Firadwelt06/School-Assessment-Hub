@@ -197,7 +197,15 @@ Prerequisites: an AWS account with permission to create CloudFormation stacks, A
 
    Do not share or commit AWS credentials. Choose the AWS region where you want the portal data stored; the stack's API, Lambda, database tables, images, and logs are created in that region.
 
-3. Run checks and deploy:
+3. If you need a new sync token, generate one locally before deployment:
+
+   ```powershell
+   python -c "import secrets; print(secrets.token_urlsafe(48))"
+   ```
+
+   Put the chosen value in the local `.env` as `CLOUD_PORTAL_SYNC_TOKEN`. Keep it private and do not put it in source code, chat, or a committed config file.
+
+4. Run checks and deploy:
 
    ```powershell
    npm run typecheck
@@ -205,21 +213,9 @@ Prerequisites: an AWS account with permission to create CloudFormation stacks, A
    npm run deploy
    ```
 
-   The deploy command bundles the Lambda handler and starts `sam deploy --guided`. Choose a stack name and region, allow the IAM role creation, and confirm deployment. The output includes `TeacherPortalUrl`; copy the exact HTTPS URL.
+   The deploy command bundles the Lambda handler and starts `sam deploy --guided`. Choose the existing stack name and region, allow IAM role creation, and confirm deployment. When prompted, enter the signup code and the exact `CLOUD_PORTAL_SYNC_TOKEN` value from the local `.env` as the portal sync token; enter it raw without `Bearer `. These values are marked `NoEcho` in CloudFormation. Do not save prompted secrets to the repository's `samconfig.toml`. The output includes `TeacherPortalUrl`; copy the exact HTTPS URL.
 
-For an already-deployed AWS portal, run the same checks and `npm run deploy` from `teacher_portal`, selecting the existing stack when SAM prompts. The stack update creates the exam-results table and grants the portal function access to it; no manual table setup is needed.
-
-4. In the AWS Console, open **Lambda**, select the function named `<your-stack-name>-teacher-portal`, and open **Configuration → Environment variables → Edit**. Add:
-   - `SCHOOL_SIGNUP_CODE`: a long signup code to share privately with teachers.
-   - `SYNC_TOKEN`: a different, long random token reserved for app-to-portal sync.
-
-   Generate a random token locally if needed:
-
-   ```powershell
-   python -c "import secrets; print(secrets.token_urlsafe(48))"
-   ```
-
-   Enter the token as its raw value—do not add `Bearer `. AWS encrypts Lambda environment variables at rest. Never put these values in source code, chat, or a committed config file.
+For an already-deployed AWS portal, run the same checks and `npm run deploy` from `teacher_portal`, selecting the existing stack when SAM prompts and re-entering the same signup and sync tokens. The stack update creates the exam-results table and grants the portal function access to it; no manual table setup is needed.
 
 5. Test that the API endpoint is live without sending a token:
 
@@ -230,7 +226,7 @@ For an already-deployed AWS portal, run the same checks and `npm run deploy` fro
 
    **401 Unauthorized** is expected and confirms the sync route is reachable. A successful sync request uses `Authorization: Bearer <SYNC_TOKEN>`.
 
-6. In the local app's `.env`, set the base URL and the same sync token:
+6. In the local app's `.env`, set the base URL and the exact same sync token you entered during deployment:
 
    ```dotenv
    CLOUD_PORTAL_URL=https://your-api-id.execute-api.your-region.amazonaws.com
